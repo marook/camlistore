@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -67,14 +68,48 @@ func (searchRoots *SearchRootsHandler) serveRoot(rw http.ResponseWriter, req *ht
 	}
 	
 	suffix := httputil.PathSuffix(req)
-	// TODO parse path segments from suffix
+	log.Printf("suffix: %s", suffix)
+	// TODO parse path segments (root name, dir names, ...) from suffix
 	
 	// TODO ui.go#serveDownload(...)
 	
-	// var rootRes *search.WithAttrResponse
 	var rootRes, err = searchRoots.client.GetPermanodesWithAttr(&search.WithAttrRequest{N: 100, Attr: "camliRoot"})
+	if err != nil {
+		log.Printf("Get permanodes failure: %s", err)
+		// TODO check if this is a good response HTTP code
+		http.Error(rw, "Server error", http.StatusInternalServerError)
+		return
+	}
 
+	dr := &search.DescribeRequest{
+		Depth: 1,
+	}
+	for _, wi := range rootRes.WithAttr {
+		dr.BlobRefs = append(dr.BlobRefs, wi.Permanode)
+	}
+	if len(dr.BlobRefs) == 0 {
+		http.Error(rw, "Not found.", http.StatusNotFound)
+		return
+	}
 
-	h := rw.Header()
-	h.Set("X-Root", // TODO
+	dres, err := searchRoots.client.Describe(dr)
+	if err != nil {
+		log.Printf("Describe failure: %s", err)
+		http.Error(rw, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	for _, wi := range rootRes.WithAttr {
+		pn := wi.Permanode
+		db := dres.Meta[pn.String()]
+		if db != nil && db.Permanode != nil {
+			name := db.Permanode.Attr.Get("camliRoot")
+			if name != "" {
+				log.Printf("root: %s %s", name, pn)
+			}
+		}
+	}
+
+	//h := rw.Header()
+	//h.Set("X-Root", // TODO
 }
