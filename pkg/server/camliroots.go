@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -50,35 +51,32 @@ func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Han
 }
 
 func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	suffix := httputil.PathSuffix(req)
-
-	switch {
-	default:
-		http.Error(rw, "Illegal URL.", http.StatusNotFound)
-		return
-	case strings.HasPrefix(suffix, "root/"):
-		camliRoots.serveRoot(rw, req)
-	}
-}
-
-func (camliRoots *CamliRootsHandler) serveRoot(rw http.ResponseWriter, req *http.Request) {
 	if req.Method != "GET" {
 		http.Error(rw, "Invalid method", http.StatusBadRequest)
 		return
 	}
 	
-	suffix := httputil.PathSuffix(req)
-	log.Printf("suffix: %s", suffix)
-	// TODO parse path segments (root name, dir names, ...) from suffix
-	
-	// TODO ui.go#serveDownload(...)
-	
-	var rootRes, err = camliRoots.client.GetPermanodesWithAttr(&search.WithAttrRequest{N: 100, Attr: "camliRoot"})
-	if err != nil {
-		log.Printf("Get permanodes failure: %s", err)
-		// TODO check if this is a good response HTTP code
-		http.Error(rw, "Server error", http.StatusInternalServerError)
+	pathSegments := strings.Split(httputil.PathSuffix(req), "/")
+	if len(pathSegments) < 1 {
+		http.Error(rw, "Not found.", http.StatusNotFound)
 		return
+	}
+
+	camliRootDescribe, err := camliRoots.FindCamliRoot(rw, pathSegments[0])
+	if err != nil {
+		return
+	}
+
+	log.Printf("crp: %s", camliRootDescribe)
+
+	// TODO ui.go#serveDownload(...)
+}
+
+func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
+	rootRes, err := camliRoots.client.GetPermanodesWithAttr(&search.WithAttrRequest{N: 100, Attr: "camliRoot"})
+	if err != nil {
+		http.Error(rw, "Server error", http.StatusInternalServerError)
+		return nil, err
 	}
 
 	dr := &search.DescribeRequest{
@@ -89,14 +87,14 @@ func (camliRoots *CamliRootsHandler) serveRoot(rw http.ResponseWriter, req *http
 	}
 	if len(dr.BlobRefs) == 0 {
 		http.Error(rw, "Not found.", http.StatusNotFound)
-		return
+		return nil, err
 	}
 
 	dres, err := camliRoots.client.Describe(dr)
 	if err != nil {
 		log.Printf("Describe failure: %s", err)
 		http.Error(rw, "Server error", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 
 	for _, wi := range rootRes.WithAttr {
@@ -104,12 +102,12 @@ func (camliRoots *CamliRootsHandler) serveRoot(rw http.ResponseWriter, req *http
 		db := dres.Meta[pn.String()]
 		if db != nil && db.Permanode != nil {
 			name := db.Permanode.Attr.Get("camliRoot")
-			if name != "" {
-				log.Printf("root: %s %s", name, pn)
+			if name == camliRootName {
+				return db, nil
 			}
 		}
 	}
-
-	//h := rw.Header()
-	//h.Set("X-Root", // TODO
+	
+	http.Error(rw, "Not found.", http.StatusNotFound)
+	return nil, errors.New("No camliRoot found with that name")
 }
