@@ -29,16 +29,16 @@ import (
 	"go4.org/jsonconfig"
 )
 
-type SearchRootsHandler struct {
+type CamliRootsHandler struct {
 	client  *client.Client
 }
 
 func init() {
-	blobserver.RegisterHandlerConstructor("search-roots",  searchRootsFromConfig)
+	blobserver.RegisterHandlerConstructor("camli-roots",  camliRootsFromConfig)
 }
 
-func searchRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
-	searchRoots := &SearchRootsHandler{
+func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
+	camliRoots := &CamliRootsHandler{
 		client: client.NewOrFail(), // automatic from flags
 	}
 
@@ -46,10 +46,10 @@ func searchRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Ha
 		return
 	}
 
-	return searchRoots, nil	
+	return camliRoots, nil	
 }
 
-func (searchRoots *SearchRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	suffix := httputil.PathSuffix(req)
 
 	switch {
@@ -57,11 +57,11 @@ func (searchRoots *SearchRootsHandler) ServeHTTP(rw http.ResponseWriter, req *ht
 		http.Error(rw, "Illegal URL.", http.StatusNotFound)
 		return
 	case strings.HasPrefix(suffix, "root/"):
-		searchRoots.serveRoot(rw, req)
+		camliRoots.serveRoot(rw, req)
 	}
 }
 
-func (searchRoots *SearchRootsHandler) serveRoot(rw http.ResponseWriter, req *http.Request) {
+func (camliRoots *CamliRootsHandler) serveRoot(rw http.ResponseWriter, req *http.Request) {
 	if req.Method != "GET" {
 		http.Error(rw, "Invalid method", http.StatusBadRequest)
 		return
@@ -73,7 +73,7 @@ func (searchRoots *SearchRootsHandler) serveRoot(rw http.ResponseWriter, req *ht
 	
 	// TODO ui.go#serveDownload(...)
 	
-	var rootRes, err = searchRoots.client.GetPermanodesWithAttr(&search.WithAttrRequest{N: 100, Attr: "camliRoot"})
+	var rootRes, err = camliRoots.client.GetPermanodesWithAttr(&search.WithAttrRequest{N: 100, Attr: "camliRoot"})
 	if err != nil {
 		log.Printf("Get permanodes failure: %s", err)
 		// TODO check if this is a good response HTTP code
@@ -92,7 +92,7 @@ func (searchRoots *SearchRootsHandler) serveRoot(rw http.ResponseWriter, req *ht
 		return
 	}
 
-	dres, err := searchRoots.client.Describe(dr)
+	dres, err := camliRoots.client.Describe(dr)
 	if err != nil {
 		log.Printf("Describe failure: %s", err)
 		http.Error(rw, "Server error", http.StatusInternalServerError)
