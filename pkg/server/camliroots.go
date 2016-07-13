@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 
+	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/blobserver"
 	"camlistore.org/pkg/client"
 	"camlistore.org/pkg/httputil"
@@ -67,9 +68,54 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 		return
 	}
 
-	log.Printf("crp: %s", camliRootDescribe)
+	currentPermanodeDescribe := camliRootDescribe
+	for _, pathSegment := range pathSegments[1:] {
+		pathAttrKey := "camliPath:" + pathSegment
+		var nextBlobRefStr *string = nil
 
-	// TODO ui.go#serveDownload(...)
+		for attrKey, attrValues := range currentPermanodeDescribe.Permanode.Attr {
+			if attrKey == pathAttrKey {
+				nextBlobRefStr = &(attrValues[0])
+				break
+			}
+		}
+
+		if nextBlobRefStr == nil {
+			http.Error(rw, "Not found.", http.StatusNotFound)
+			return
+		}
+
+		nextBlobRef, ok := blob.Parse(*nextBlobRefStr)
+		if !ok {
+			log.Printf("Failed to parse ref %s", *nextBlobRefStr)
+			http.Error(rw, "Server error", http.StatusInternalServerError)
+			return
+		}
+
+		dr := &search.DescribeRequest{
+			Depth: 1,
+			BlobRefs: []blob.Ref{nextBlobRef},
+		}
+		dres, err := camliRoots.client.Describe(dr)
+		if err != nil {
+			log.Printf("Describe failure: %s", err)
+			http.Error(rw, "Server error", http.StatusInternalServerError)
+			return
+		}
+
+		db := dres.Meta[*nextBlobRefStr]
+		if db == nil || db.Permanode == nil {
+			log.Printf("Expected permanode: %s", *nextBlobRefStr)
+			http.Error(rw, "Server error", http.StatusInternalServerError)
+			return
+		}
+
+		currentPermanodeDescribe = db
+	}
+
+	log.Printf("last permanode: %s", currentPermanodeDescribe)
+
+	// TODO download.go#ServeHTTP(...)
 }
 
 func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
