@@ -42,7 +42,7 @@ type CamliRootsHandler struct {
 	// Search is optional. If present, it's used to map a fileref
 	// to a wholeref, if the Fetcher is of a type that knows how
 	// to get at a wholeref more efficiently. (e.g. blobpacked)
-	Search *search.Handler
+	search *search.Handler
 }
 
 func init() {
@@ -53,15 +53,42 @@ func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Han
 	camliRoots := &CamliRootsHandler{
 		// TODO maybe we should try not to mix client and server access to the blobs here
 		client: client.NewOrFail(), // automatic from flags
-		Fetcher: nil, // TODO init me (ui.root.Storage)
-		Search: nil, // TODO init me (ui.search)
+		search: nil, // initialized by InitHandler(...)
 	}
 
 	if err = conf.Validate(); err != nil {
 		return
 	}
 
+	rootPrefix, _, err := ld.FindHandlerByType("root")
+	if err != nil {
+		return nil, errors.New("No root handler configured, which is necessary for the camli-roots handler")
+	}
+	if h, err := ld.GetHandler(rootPrefix); err == nil {
+		camliRoots.Fetcher = h.(*RootHandler).Storage
+	} else {
+		return nil, errors.New("failed to find the 'root' handler")
+	}
+
 	return camliRoots, nil	
+}
+
+func (camliRoots *CamliRootsHandler) InitHandler(hl blobserver.FindHandlerByTyper) error {
+	// InitHandler is called after all handlers have been setup, so the bootstrap
+	// of the camliRoot node for publishers in dev-mode is already done.
+	searchPrefix, _, err := hl.FindHandlerByType("search")
+	if err != nil {
+		return errors.New("No search handler configured, which is necessary for the ui handler")
+	}
+	var sh *search.Handler
+	_, hi := hl.AllHandlers()
+	if h, ok := hi[searchPrefix]; !ok {
+		return errors.New("failed to find the \"search\" handler")
+	} else {
+		sh = h.(*search.Handler)
+		camliRoots.search = sh
+	}
+	return nil
 }
 
 func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -217,7 +244,7 @@ func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blo
 	// TODO this function was copied from download.go... should be refactored to be unique in one place
 
 	// Fast path for blobpacked.
-	fi, ok := fileInfoPacked(camliRootsHandler.Search, camliRootsHandler.Fetcher, req, file)
+	fi, ok := fileInfoPacked(camliRootsHandler.search, camliRootsHandler.Fetcher, req, file)
 	if ok {
 		return fi, nil
 	}
