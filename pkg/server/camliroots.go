@@ -51,6 +51,7 @@ func init() {
 
 func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
 	camliRoots := &CamliRootsHandler{
+		// TODO maybe we should try not to mix client and server access to the blobs here
 		client: client.NewOrFail(), // automatic from flags
 		Fetcher: nil, // TODO init me (ui.root.Storage)
 		Search: nil, // TODO init me (ui.search)
