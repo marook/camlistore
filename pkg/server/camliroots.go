@@ -18,14 +18,18 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/blobserver"
 	"camlistore.org/pkg/client"
 	"camlistore.org/pkg/httputil"
+	"camlistore.org/pkg/magic"
+	"camlistore.org/pkg/schema"
 	"camlistore.org/pkg/search"
 
 	"go4.org/jsonconfig"
@@ -33,6 +37,12 @@ import (
 
 type CamliRootsHandler struct {
 	client  *client.Client
+	Fetcher blob.Fetcher
+
+	// Search is optional. If present, it's used to map a fileref
+	// to a wholeref, if the Fetcher is of a type that knows how
+	// to get at a wholeref more efficiently. (e.g. blobpacked)
+	Search *search.Handler
 }
 
 func init() {
@@ -42,6 +52,8 @@ func init() {
 func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
 	camliRoots := &CamliRootsHandler{
 		client: client.NewOrFail(), // automatic from flags
+		Fetcher: nil, // TODO init me (ui.root.Storage)
+		Search: nil, // TODO init me (ui.search)
 	}
 
 	if err = conf.Validate(); err != nil {
@@ -113,9 +125,7 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 		currentPermanodeDescribe = db
 	}
 
-	log.Printf("last permanode: %s", currentPermanodeDescribe)
-
-	// TODO download.go#ServeHTTP(...)
+	camliRoots.ServePermanodeContent(rw, req, currentPermanodeDescribe)
 }
 
 func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
@@ -156,4 +166,73 @@ func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camli
 	
 	http.Error(rw, "Not found.", http.StatusNotFound)
 	return nil, errors.New("No camliRoot found with that name")
+}
+
+func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWriter, req *http.Request, permanodeDescribe *search.DescribedBlob){
+	// TODO large parts of this function are copied from download.go#ServeHTTP(...). should be refactored to reduce duplication.
+	if req.Header.Get("If-Modified-Since") != "" {
+		// TODO compare some dates
+		// rw.WriteHeader(http.StatusNotModified)
+		// return
+	}
+
+	// TODO make sure that we actually got ONE camliContent attribute
+	contentRefStr := permanodeDescribe.Permanode.Attr.Get("camliContent")
+	file, ok := blob.Parse(contentRefStr)
+	if !ok {
+		log.Printf("Failed to parse ref %s", contentRefStr)
+		http.Error(rw, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	fi, err := camliRoots.fileInfo(req, file)
+	if err != nil {
+		http.Error(rw, "Can't serve file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer fi.close()
+
+	h := rw.Header()
+	h.Set("Content-Length", fmt.Sprint(fi.size))
+	h.Set("Expires", time.Now().Add(oneYear).Format(http.TimeFormat))
+	h.Set("Content-Type", fi.mime)
+
+	if fi.mime == "application/octet-stream" {
+		// Chrome seems to silently do nothing on
+		// application/octet-stream unless this is set.
+		// Maybe it's confused by lack of URL it recognizes
+		// along with lack of mime type?
+		fileName := fi.name
+		if fileName == "" {
+			fileName = "file-" + file.String() + ".dat"
+		}
+		rw.Header().Set("Content-Disposition", "attachment; filename="+fileName)
+	}
+
+	http.ServeContent(rw, req, "", time.Now(), fi.rs)
+}
+
+func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blob.Ref) (fi fileInfo, err error) {
+	// TODO this function was copied from download.go... should be refactored to be unique in one place
+
+	// Fast path for blobpacked.
+	fi, ok := fileInfoPacked(camliRootsHandler.Search, camliRootsHandler.Fetcher, req, file)
+	if ok {
+		return fi, nil
+	}
+	fr, err := schema.NewFileReader(camliRootsHandler.Fetcher, file)
+	if err != nil {
+		return
+	}
+	mime := magic.MIMETypeFromReaderAt(fr)
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return fileInfo{
+		mime:  mime,
+		name:  fr.FileName(),
+		size:  fr.Size(),
+		rs:    fr,
+		close: fr.Close,
+	}, nil
 }
