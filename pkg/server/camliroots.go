@@ -14,6 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+/*
+Registers the "camli-roots" handler for delivering content from the
+roots directory structure.
+
+Example low-level config:
+
+    "/myRoots/": {
+        "handler": "camli-roots",
+        "handlerArgs": {}
+    }
+
+*/
+
 package server
 
 import (
