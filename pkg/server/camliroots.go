@@ -267,6 +267,12 @@ func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blo
 	}
 	mime := magic.MIMETypeFromReaderAt(fr)
 	if mime == "" {
+		name := fr.FileName()
+		if strings.HasSuffix(name, ".css") {
+			mime = "text/css"
+		}
+	}
+	if mime == "" {
 		mime = "application/octet-stream"
 	}
 	return fileInfo{
