@@ -46,6 +46,7 @@ import (
 	"camlistore.org/pkg/search"
 
 	"go4.org/jsonconfig"
+	"golang.org/x/net/context"
 )
 
 type CamliRootsHandler struct {
@@ -149,7 +150,7 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 			Depth: 1,
 			BlobRefs: []blob.Ref{nextBlobRef},
 		}
-		dres, err := camliRoots.client.Describe(dr)
+		dres, err := camliRoots.client.Describe(context.TODO(), dr)
 		if err != nil {
 			log.Printf("Describe failure: %s", err)
 			http.Error(rw, "Server error", http.StatusInternalServerError)
@@ -187,7 +188,7 @@ func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camli
 		return nil, err
 	}
 
-	dres, err := camliRoots.client.Describe(dr)
+	dres, err := camliRoots.client.Describe(context.TODO(), dr)
 	if err != nil {
 		log.Printf("Describe failure: %s", err)
 		http.Error(rw, "Server error", http.StatusInternalServerError)
@@ -257,7 +258,7 @@ func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blo
 	// TODO this function was copied from download.go... should be refactored to be unique in one place
 
 	// Fast path for blobpacked.
-	fi, ok := fileInfoPacked(camliRootsHandler.search, camliRootsHandler.Fetcher, req, file)
+	fi, ok := fileInfoPacked(context.TODO(), camliRootsHandler.search, camliRootsHandler.Fetcher, req, file)
 	if ok {
 		return fi, nil
 	}
