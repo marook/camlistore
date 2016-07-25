@@ -110,6 +110,9 @@ func (b *lowBuilder) dbName(of string) string {
 		}
 		return "camli" + username
 	}
+	if of == "blobpacked_index" {
+		return of
+	}
 	return ""
 }
 
@@ -134,13 +137,16 @@ func (b *lowBuilder) searchOwner() (br blob.Ref, err error) {
 func (b *lowBuilder) addPublishedConfig(tlsO *tlsOpts) error {
 	published := b.high.Publish
 	for k, v := range published {
+		// trick in case all of the fields of v.App were omitted, which would leave v.App nil.
+		if v.App == nil {
+			v.App = &serverconfig.App{}
+		}
 		if v.CamliRoot == "" {
 			return fmt.Errorf("Missing \"camliRoot\" key in configuration for %s.", k)
 		}
 		if v.GoTemplate == "" {
 			return fmt.Errorf("Missing \"goTemplate\" key in configuration for %s.", k)
 		}
-
 		appConfig := map[string]interface{}{
 			"camliRoot":  v.CamliRoot,
 			"cacheRoot":  v.CacheRoot,
@@ -157,21 +163,53 @@ func (b *lowBuilder) addPublishedConfig(tlsO *tlsOpts) error {
 				appConfig["httpsKey"] = tlsO.httpsKey
 			}
 		}
-		a := args{
-			"program":   v.Program,
-			"appConfig": appConfig,
-		}
-		if v.BaseURL != "" {
-			a["baseURL"] = v.BaseURL
-		}
 		program := "publisher"
 		if v.Program != "" {
 			program = v.Program
 		}
-		a["program"] = program
+		a := args{
+			"prefix":    k,
+			"program":   program,
+			"appConfig": appConfig,
+		}
+		if v.Listen != "" {
+			a["listen"] = v.Listen
+		}
+		if v.APIHost != "" {
+			a["apiHost"] = v.APIHost
+		}
+		if v.BackendURL != "" {
+			a["backendURL"] = v.BackendURL
+		}
+		if b.low["listen"] != nil && b.low["listen"].(string) != "" {
+			a["serverListen"] = b.low["listen"].(string)
+		}
+		if b.low["baseURL"] != nil && b.low["baseURL"].(string) != "" {
+			a["serverBaseURL"] = b.low["baseURL"].(string)
+		}
 		b.addPrefix(k, "app", a)
 	}
 	return nil
+}
+
+func (b *lowBuilder) sortedName() string {
+	switch {
+	case b.high.MySQL != "":
+		return "MySQL"
+	case b.high.PostgreSQL != "":
+		return "PostgreSQL"
+	case b.high.Mongo != "":
+		return "MongoDB"
+	case b.high.MemoryIndex:
+		return "in memory LevelDB"
+	case b.high.SQLite != "":
+		return "SQLite"
+	case b.high.KVFile != "":
+		return "cznic/kv"
+	case b.high.LevelDB != "":
+		return "LevelDB"
+	}
+	panic("internal error: sortedName didn't find a sorted implementation")
 }
 
 // kvFileType returns the file based sorted type defined for index storage, if
@@ -306,7 +344,7 @@ func (b *lowBuilder) sortedStorageAt(sortedType, filePrefix string) (map[string]
 		}, nil
 	}
 	if sortedType != "index" && filePrefix == "" {
-		return nil, fmt.Errorf("internal error: use of sortedStorageAt with a non-index type and no file location for non-database sorted implementation")
+		return nil, fmt.Errorf("internal error: use of sortedStorageAt with a non-index type (%v) and no file location for non-database sorted implementation", sortedType)
 	}
 	// dbFile returns path directly if sortedType == "index", else it returns filePrefix+"."+ext.
 	dbFile := func(path, ext string) string {
@@ -409,18 +447,12 @@ func (b *lowBuilder) addS3Config(s3 string) error {
 	b.addPrefix("/bs-loose/", "storage-s3", packedS3Args(path.Join(bucket, "loose")))
 	b.addPrefix("/bs-packed/", "storage-s3", packedS3Args(path.Join(bucket, "packed")))
 
-	// TODO(mpl): I think that should be the job of sortedStorageAt, shouldn't
-	// it? It could use its sortedType argument to create a file path if the
-	// filePrefix argument is empty.
-	var packIndexDir string
-	if b.high.SQLite != "" {
-		packIndexDir = b.high.SQLite
-	} else if b.high.KVFile != "" {
-		packIndexDir = b.high.KVFile
-	} else if b.high.LevelDB != "" {
-		packIndexDir = b.high.LevelDB
-	}
-	blobPackedIndex, err := b.sortedStorageAt("blobpacked_index", filepath.Join(filepath.Dir(packIndexDir), "packindex"))
+	// If index is DBMS, then blobPackedIndex is in DBMS too, with
+	// whatever dbname is defined for "blobpacked_index", or defaulting
+	// to "blobpacked_index". Otherwise blobPackedIndex is same
+	// file-based DB as the index, in same dir, but named
+	// packindex.dbtype.
+	blobPackedIndex, err := b.sortedStorageAt("blobpacked_index", filepath.Join(b.indexFileDir(), "packindex"))
 	if err != nil {
 		return err
 	}
@@ -541,7 +573,12 @@ func (b *lowBuilder) addGoogleCloudStorageConfig(v string) error {
 				"refresh_token": refreshToken,
 			},
 		})
-		blobPackedIndex, err := b.sortedStorageAt("blobpacked_index", "")
+		// If index is DBMS, then blobPackedIndex is in DBMS too, with
+		// whatever dbname is defined for "blobpacked_index", or defaulting
+		// to "blobpacked_index". Otherwise blobPackedIndex is same
+		// file-based DB as the index, in same dir, but named
+		// packindex.dbtype.
+		blobPackedIndex, err := b.sortedStorageAt("blobpacked_index", filepath.Join(b.indexFileDir(), "packindex"))
 		if err != nil {
 			return err
 		}
@@ -804,7 +841,7 @@ func (b *lowBuilder) build() (*Config, error) {
 	case b.runIndex() && numIndexers != 1:
 		return nil, fmt.Errorf("With runIndex set true, you can only pick exactly one indexer (mongo, mysql, postgres, sqlite, kvIndexFile, leveldb, memoryIndex).")
 	case !b.runIndex() && numIndexers != 0:
-		return nil, fmt.Errorf("With runIndex disabled, you can't specify any of mongo, mysql, postgres, sqlite.")
+		log.Printf("Indexer disabled, but %v will be used for other indexes, queues, caches, etc.", b.sortedName())
 	}
 
 	if conf.Identity == "" {

@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"camlistore.org/pkg/httputil"
-	"camlistore.org/pkg/types"
+	"go4.org/types"
 
 	"go4.org/ctxutil"
 	"golang.org/x/net/context"
@@ -305,6 +305,49 @@ var keywordTests = []keywordTestcase{
 				},
 			},
 		},
+	},
+
+	{
+		object: newWith(),
+		args:   []string{"fitz"},
+		want: &Constraint{
+			Permanode: &PermanodeConstraint{
+				Attr: "with",
+				ValueInSet: &Constraint{
+					Logical: &LogicalConstraint{
+						Op: "and",
+						A: &Constraint{
+							Permanode: &PermanodeConstraint{
+								Attr:  "camliNodeType",
+								Value: "foursquare.com:person",
+							},
+						},
+						B: &Constraint{
+							Logical: &LogicalConstraint{
+								Op: "or",
+								A: &Constraint{
+									Permanode: &PermanodeConstraint{
+										Attr: "givenName",
+										ValueMatches: &StringConstraint{
+											Contains:        "fitz",
+											CaseInsensitive: true,
+										},
+									},
+								},
+								B: &Constraint{
+									Permanode: &PermanodeConstraint{
+										Attr: "familyName",
+										ValueMatches: &StringConstraint{
+											Contains:        "fitz",
+											CaseInsensitive: true,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}},
 	},
 
 	// Image predicates

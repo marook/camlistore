@@ -45,7 +45,7 @@ import (
 	"camlistore.org/pkg/sorted"
 	"camlistore.org/pkg/sorted/leveldb"
 
-	"camlistore.org/third_party/code.google.com/p/xsrftoken"
+	"code.google.com/p/xsrftoken"
 
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
@@ -54,11 +54,7 @@ import (
 	"google.golang.org/cloud/compute/metadata"
 )
 
-const (
-	// duration after which a progress state is dropped from the progress map
-	progressStateExpiration = 7 * 24 * time.Hour
-	cookieExpiration        = 24 * time.Hour
-)
+const cookieExpiration = 24 * time.Hour
 
 var (
 	helpGenCert      = `A self-signed HTTPS certificate will be generated for the chosen domain name (or for "localhost" if left blank) and set as the default. You will be able to set another HTTPS certificate for Camlistore afterwards.`
@@ -496,21 +492,6 @@ func (h *DeployHandler) serveOldInstance(w http.ResponseWriter, br blob.Ref, dep
 		)
 		return true
 	}
-	var existPassword string
-	for _, item := range inst.Metadata.Items {
-		if item.Key == "camlistore-password" {
-			existPassword = *(item.Value)
-		}
-	}
-	if depl.Conf.Password != "" && existPassword != depl.Conf.Password {
-		h.logger.Printf("Instance (%v, %v, %v) already exists, but with different password",
-			depl.Conf.Project, depl.Conf.Name, depl.Conf.Zone)
-		h.serveErrorPage(w,
-			fmt.Errorf("Instance already running at %v. You need to manually delete the old one before creating a new one.", addr(inst)),
-			helpDeleteInstance,
-		)
-		return true
-	}
 	h.logger.Printf("Reusing existing instance for (%v, %v, %v)", depl.Conf.Project, depl.Conf.Name, depl.Conf.Zone)
 
 	if err := h.recordState(br, &creationState{
@@ -573,8 +554,7 @@ func (h *DeployHandler) serveInstanceState(w http.ResponseWriter, r *http.Reques
 	}
 	if state.Err != "" {
 		// No need to log that error here since we're already doing it in serveCallback
-		// TODO(mpl): fix overescaping of double quotes.
-		h.serveErrorPage(w, fmt.Errorf("An error occurred while creating your instance: %q. ", state.Err))
+		h.serveErrorPage(w, fmt.Errorf("An error occurred while creating your instance: %v.", state.Err))
 		return
 	}
 	if state.Success || state.Exists {
@@ -686,7 +666,6 @@ func (h *DeployHandler) confFromForm(r *http.Request) (*InstanceConf, error) {
 		Zone:     zone,
 		Hostname: formValueOrDefault(r, "hostname", "localhost"),
 		SSHPub:   formValueOrDefault(r, "sshPub", ""),
-		Password: r.FormValue("password"),
 		Ctime:    time.Now(),
 		WIP:      r.FormValue("WIP") == "1",
 	}, nil
@@ -837,6 +816,12 @@ func dataStores() (blobserver.Storage, sorted.KeyValue, error) {
 	return instConf, instState, nil
 }
 
+// TODO(mpl): AddTemplateTheme is a mistake, since the text argument is user
+// input and hence can contain just any field, that is not a known field of
+// TemplateData. Which will make the execution of the template fail. We should
+// probably just somehow hardcode website/tmpl/page.html as the template.
+// See issue #815
+
 // AddTemplateTheme allows to enhance the aesthetics of the default template. To that
 // effect, text can provide the template definitions for "header", "banner", "toplinks", and
 // "footer".
@@ -979,6 +964,10 @@ func tplHTML() string {
 
 		<h4>First connection</h4>
 		<p>
+		The password to access the web interface of your Camlistore instance was automatically generated. Go to the <a href="{{.ProjectConsoleURL}}/instancesDetail/zones/{{.Conf.Zone}}/instances/camlistore-server">camlistore-server instance</a> page to view it, and possibly change it. It is <b>camlistore-password</b> in the custom metadata section. Similarly, the username is camlistore-username. Then <a href="https://{{.InstanceIP}}/status">restart</a> Camlistore if you changed anything.
+		</p>
+
+		<p>
 		A self-signed HTTPS certificate was automatically generated with "{{.Conf.Hostname}}" as the common name.<br>
 		You will need to add an exception for it in your browser when you get a security warning the first time you connect. When you add a trusted certificate, verify that its certificate fingerprint matches one of:
 		<table>
@@ -990,10 +979,6 @@ func tplHTML() string {
 		<h4>Further configuration</h4>
 		<p>
 		Manage your instance at <a href="{{.ProjectConsoleURL}}">{{.ProjectConsoleURL}}</a>.
-		</p>
-
-		<p>
-		To change your login and password, go to the <a href="{{.ProjectConsoleURL}}/instancesDetail/zones/{{.Conf.Zone}}/instances/camlistore-server">camlistore-server instance</a> page. Set camlistore-username and/or camlistore-password in the custom metadata section. Then <a href="https://{{.InstanceIP}}/status">restart</a> Camlistore.
 		</p>
 
 		<p>
@@ -1063,11 +1048,6 @@ and visit both the "Compute Engine" and "Storage" sections for your project.
 			</ul>
 		</ul>
 		</td></tr>
-			<tr valign=top>
-                           <td align=right><nobr>Password:</nobr></td>
-                           <td><input name="password" size=30><br/>
-                                   <span style="font-size:75%"><i>(Optional)</i> New password for your Camlistore server's <b>camlistore</b> user. <b>NOT</b> your Google account's password. If blank, a random password is generated and instructions for finding it are provided on the next step.</span>
-                          </td></tr>
 			<tr valign=top><td align=right><nobr><a href="{{.Help.zones}}">Zone</a> or Region</nobr>:</td><td>
 				<input name="zone" list="regions" value="` + DefaultRegion + `">
 				<datalist id="regions">

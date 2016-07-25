@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package mongo provides an implementation of sorted.KeyValue
 // using MongoDB.
-package mongo
+package mongo // import "camlistore.org/pkg/sorted/mongo"
 
 import (
 	"bytes"
@@ -27,8 +27,8 @@ import (
 	"camlistore.org/pkg/sorted"
 	"go4.org/jsonconfig"
 
-	"camlistore.org/third_party/labix.org/v2/mgo"
-	"camlistore.org/third_party/labix.org/v2/mgo/bson"
+	"labix.org/v2/mgo"
+	"labix.org/v2/mgo/bson"
 )
 
 // We explicitely separate the key and the value in a document,
@@ -191,7 +191,7 @@ func (kv *keyValue) CommitBatch(bm sorted.BatchMutation) error {
 	defer kv.mu.Unlock()
 	for _, m := range b.Mutations() {
 		if m.IsDelete() {
-			if err := kv.db.Remove(bson.M{mgoKey: m.Key()}); err != nil {
+			if err := kv.db.Remove(bson.M{mgoKey: m.Key()}); err != nil && err != mgo.ErrNotFound {
 				return err
 			}
 		} else {

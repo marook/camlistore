@@ -27,15 +27,15 @@ import (
 	"camlistore.org/pkg/auth"
 	"camlistore.org/pkg/blobserver"
 	"camlistore.org/pkg/buildinfo"
-	"camlistore.org/pkg/env"
 	"camlistore.org/pkg/httputil"
 	"camlistore.org/pkg/images"
 	"camlistore.org/pkg/jsonsign/signhandler"
 	"camlistore.org/pkg/osutil"
 	"camlistore.org/pkg/search"
-	"camlistore.org/pkg/types"
 	"camlistore.org/pkg/types/camtypes"
+
 	"go4.org/jsonconfig"
+	"go4.org/types"
 )
 
 // RootHandler handles serving the about/splash page.
@@ -192,9 +192,6 @@ func (rh *RootHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 	f("<html><body><p>This is camlistored (%s), a "+
 		"<a href='http://camlistore.org'>Camlistore</a> server.</p>", buildinfo.Version())
-	if auth.IsLocalhost(req) && !env.IsDev() {
-		f("<p>If you're coming from localhost, configure your Camlistore server at <a href='/setup'>/setup</a>.</p>")
-	}
 	if rh.ui != nil {
 		f("<p>To manage your content, access the <a href='%s'>%s</a>.</p>", rh.ui.prefix, rh.ui.prefix)
 	}
@@ -228,7 +225,7 @@ func (rh *RootHandler) serveDiscovery(rw http.ResponseWriter, req *http.Request)
 		StatusRoot:   rh.statusRoot,
 		OwnerName:    rh.OwnerName,
 		UserName:     rh.Username,
-		WSAuthToken:  auth.ProcessRandom(),
+		AuthToken:    auth.DiscoveryToken(),
 		ThumbVersion: images.ThumbnailVersion(),
 	}
 	if gener, ok := rh.Storage.(blobserver.Generationer); ok {

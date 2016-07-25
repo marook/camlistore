@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// The publisher command is a server application to publish items from a
+// Camlistore server. See also https://camlistore.org/doc/publishing
 package main
 
 import (
@@ -48,12 +50,12 @@ import (
 	"camlistore.org/pkg/search"
 	"camlistore.org/pkg/server"
 	"camlistore.org/pkg/sorted"
+	_ "camlistore.org/pkg/sorted/kvfile"
 	"camlistore.org/pkg/types/camtypes"
 	"camlistore.org/pkg/webserver"
 
 	"go4.org/syncutil"
-
-	_ "camlistore.org/pkg/sorted/kvfile"
+	"golang.org/x/net/context"
 )
 
 var (
@@ -186,10 +188,7 @@ func newPublishHandler(conf *config) *publishHandler {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	serverURL := os.Getenv("CAMLI_API_HOST")
-	if serverURL == "" {
-		logger.Fatal("CAMLI_API_HOST var not set")
-	}
+
 	var cache blobserver.Storage
 	var thumbMeta *server.ThumbMeta
 	if conf.CacheRoot != "" {
@@ -398,7 +397,8 @@ func (ph *publishHandler) describe(br blob.Ref) (*search.DescribedBlob, error) {
 		return des, nil
 	}
 	ph.describedCacheMu.RUnlock()
-	res, err := ph.cl.Describe(&search.DescribeRequest{
+	ctx := context.TODO()
+	res, err := ph.cl.Describe(ctx, &search.DescribeRequest{
 		BlobRef: br,
 		Depth:   1,
 	})
@@ -446,10 +446,10 @@ type publishRequest struct {
 	subjectBasePath      string
 }
 
-func (ph *publishHandler) NewRequest(rw http.ResponseWriter, req *http.Request) (*publishRequest, error) {
+func (ph *publishHandler) NewRequest(w http.ResponseWriter, r *http.Request) (*publishRequest, error) {
 	// splits a path request into its suffix and subresource parts.
 	// e.g. /blog/foo/camli/res/file/xxx -> ("foo", "file/xxx")
-	suffix, res := httputil.PathSuffix(req), ""
+	suffix, res := strings.TrimPrefix(r.URL.Path, "/"), ""
 	if strings.HasPrefix(suffix, "-/") {
 		suffix, res = "", suffix[2:]
 	} else if s := strings.SplitN(suffix, "/-/", 2); len(s) == 2 {
@@ -458,10 +458,10 @@ func (ph *publishHandler) NewRequest(rw http.ResponseWriter, req *http.Request) 
 
 	return &publishRequest{
 		ph:              ph,
-		rw:              rw,
-		req:             req,
+		rw:              w,
+		req:             r,
 		suffix:          suffix,
-		base:            httputil.PathBase(req),
+		base:            app.PathPrefix(r),
 		subres:          res,
 		rootpn:          ph.rootNode,
 		inSubjectChain:  make(map[string]bool),

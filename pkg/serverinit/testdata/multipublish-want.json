@@ -68,7 +68,9 @@
 			"handler": "app",
 			"handlerArgs": {
 				"program": "publisher",
-				"baseURL": "http://localhost:3178/",
+				"prefix": "/music/",
+				"serverListen": "localhost:3179",
+				"backendURL": "http://localhost:3178/",
 				"appConfig": {
 					"camliRoot": "musicRoot",
 					"goTemplate": "music.html",
@@ -88,6 +90,8 @@
 			"handler": "app",
 			"handlerArgs": {
 				"program": "publisher",
+				"prefix": "/pics/",
+				"serverListen": "localhost:3179",
 				"appConfig": {
 					"camliRoot": "picsRoot",
 					"goTemplate": "gallery.html",

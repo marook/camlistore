@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package mysql provides an implementation of sorted.KeyValue
 // on top of MySQL.
-package mysql
+package mysql // import "camlistore.org/pkg/sorted/mysql"
 
 import (
 	"database/sql"
@@ -31,8 +31,9 @@ import (
 	"camlistore.org/pkg/env"
 	"camlistore.org/pkg/sorted"
 	"camlistore.org/pkg/sorted/sqlkv"
-	_ "camlistore.org/third_party/github.com/go-sql-driver/mysql"
+	_ "github.com/go-sql-driver/mysql"
 	"go4.org/jsonconfig"
+	"go4.org/syncutil"
 )
 
 func init() {
@@ -85,6 +86,7 @@ func newKeyValueFromJSONConfig(cfg jsonconfig.Obj) (sorted.KeyValue, error) {
 				return nil, err
 			}
 			if !hasLargeVarchar(sv) {
+
 				errMsg += "\nYour MySQL server is too old (< 5.0.3) to support VARCHAR larger than 255."
 			}
 			return nil, fmt.Errorf(errMsg, tableSQL, createError)
@@ -95,10 +97,12 @@ func newKeyValueFromJSONConfig(cfg jsonconfig.Obj) (sorted.KeyValue, error) {
 	}
 
 	kv := &keyValue{
-		db: db,
+		dsn: dsn,
+		db:  db,
 		KeyValue: &sqlkv.KeyValue{
 			DB:          db,
 			TablePrefix: database + ".",
+			Gate:        syncutil.NewGate(20), // arbitrary limit. TODO: configurable, automatically-learned?
 		},
 	}
 	if err := kv.ping(); err != nil {
@@ -158,7 +162,17 @@ func openOrCachedDB(dsn string) (*sql.DB, error) {
 type keyValue struct {
 	*sqlkv.KeyValue
 
-	db *sql.DB
+	dsn string
+	db  *sql.DB
+}
+
+// Close overrides KeyValue.Close because we need to remove the DB from the pool
+// when closing.
+func (kv *keyValue) Close() error {
+	dbsmu.Lock()
+	defer dbsmu.Unlock()
+	delete(dbs, kv.dsn)
+	return kv.DB.Close()
 }
 
 func (kv *keyValue) ping() error {

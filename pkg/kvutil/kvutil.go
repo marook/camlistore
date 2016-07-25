@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package kvutil contains helpers related to
 // github.com/cznic/kv.
-package kvutil
+package kvutil // import "camlistore.org/pkg/kvutil"
 
 import (
 	"fmt"
@@ -24,8 +24,9 @@ import (
 	"os"
 	"strconv"
 
-	"camlistore.org/third_party/github.com/camlistore/lock"
-	"camlistore.org/third_party/github.com/cznic/kv"
+	"github.com/cznic/kv"
+
+	"go4.org/lock"
 )
 
 // Open opens the named kv DB file for reading/writing. It

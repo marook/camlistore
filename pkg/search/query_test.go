@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 	"camlistore.org/pkg/index/indextest"
 	. "camlistore.org/pkg/search"
 	"camlistore.org/pkg/test"
-	"camlistore.org/pkg/types"
+	"go4.org/types"
+	"golang.org/x/net/context"
 )
 
 // indexType is one of the three ways we test the query handler code.
@@ -53,15 +55,14 @@ type queryTest struct {
 	id    *indextest.IndexDeps
 	itype indexType
 
-	Handler func() *Handler
+	handlerOnce sync.Once
+	newHandler  func() *Handler
+	handler     *Handler // initialized with newHandler
 }
 
-func querySetup(t testing.TB) (*indextest.IndexDeps, *Handler) {
-	idx := index.NewMemoryIndex() // string key-value pairs in memory, as if they were on disk
-	id := indextest.NewIndexDeps(idx)
-	id.Fataler = t
-	h := NewHandler(idx, id.SignerBlobRef)
-	return id, h
+func (qt *queryTest) Handler() *Handler {
+	qt.handlerOnce.Do(func() { qt.handler = qt.newHandler() })
+	return qt.handler
 }
 
 func testQuery(t testing.TB, fn func(*queryTest)) {
@@ -96,7 +97,7 @@ func testQueryType(t testing.TB, fn func(*queryTest), itype indexType) {
 		itype: itype,
 	}
 	qt.id.Fataler = t
-	qt.Handler = func() *Handler {
+	qt.newHandler = func() *Handler {
 		h := NewHandler(idx, qt.id.SignerBlobRef)
 		if itype == indexCorpusScan {
 			if corpus, err = idx.KeepInMemory(); err != nil {
@@ -110,13 +111,6 @@ func testQueryType(t testing.TB, fn func(*queryTest), itype indexType) {
 		return h
 	}
 	fn(qt)
-}
-
-func dumpRes(t *testing.T, res *SearchResult) {
-	t.Logf("Got: %#v", res)
-	for i, got := range res.Blobs {
-		t.Logf(" %d. %s", i, got)
-	}
 }
 
 func (qt *queryTest) wantRes(req *SearchQuery, wanted ...blob.Ref) {
@@ -634,10 +628,11 @@ func TestQueryPermanodeModtime(t *testing.T) {
 // TODO: make all the indextest/tests.go
 // also test the three memory build modes that testQuery does.
 func TestDecodeFileInfo(t *testing.T) {
+	ctx := context.Background()
 	testQuery(t, func(qt *queryTest) {
 		id := qt.id
 		fileRef, wholeRef := id.UploadFile("file.gif", "GIF87afoo", time.Unix(456, 0))
-		res, err := qt.Handler().Describe(&DescribeRequest{
+		res, err := qt.Handler().Describe(ctx, &DescribeRequest{
 			BlobRef: fileRef,
 		})
 		if err != nil {
@@ -996,6 +991,71 @@ func TestQueryChildren(t *testing.T) {
 			},
 		}
 		qt.wantRes(sq, p1, p2)
+	})
+}
+
+func TestQueryParent(t *testing.T) {
+	testQueryTypes(t, memIndexTypes, func(qt *queryTest) {
+		id := qt.id
+
+		pdir1 := id.NewPlannedPermanode("some_dir_1")
+		pdir2 := id.NewPlannedPermanode("some_dir_2")
+		p1 := id.NewPlannedPermanode("1")
+		p2 := id.NewPlannedPermanode("2")
+		p3 := id.NewPlannedPermanode("3")
+
+		id.AddAttribute(pdir1, "camliMember", p1.String())
+		id.AddAttribute(pdir1, "camliPath:foo", p2.String())
+		id.AddAttribute(pdir1, "other", p3.String())
+
+		id.AddAttribute(pdir2, "camliPath:bar", p1.String())
+
+		// Make p1, p2, and p3 actually exist. (permanodes without attributes are dead)
+		id.AddAttribute(p1, "x", "x")
+		id.AddAttribute(p2, "x", "x")
+		id.AddAttribute(p3, "x", "x")
+
+		sq := &SearchQuery{
+			Constraint: &Constraint{
+				Permanode: &PermanodeConstraint{
+					Relation: &RelationConstraint{
+						Relation: "child",
+						Any: &Constraint{
+							BlobRefPrefix: p1.String(),
+						},
+					},
+				},
+			},
+		}
+		qt.wantRes(sq, pdir1, pdir2)
+
+		sq = &SearchQuery{
+			Constraint: &Constraint{
+				Permanode: &PermanodeConstraint{
+					Relation: &RelationConstraint{
+						Relation: "child",
+						Any: &Constraint{
+							BlobRefPrefix: p2.String(),
+						},
+					},
+				},
+			},
+		}
+		qt.wantRes(sq, pdir1)
+
+		sq = &SearchQuery{
+			Constraint: &Constraint{
+				Permanode: &PermanodeConstraint{
+					Relation: &RelationConstraint{
+						Relation: "child",
+						Any: &Constraint{
+							BlobRefPrefix: p3.String(),
+						},
+					},
+				},
+			},
+		}
+		qt.wantRes(sq)
 	})
 }
 

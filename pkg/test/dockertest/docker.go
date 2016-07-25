@@ -17,7 +17,7 @@ limitations under the License.
 /*
 Package dockertest contains helper functions for setting up and tearing down docker containers to aid in testing.
 */
-package dockertest
+package dockertest // import "camlistore.org/pkg/test/dockertest"
 
 import (
 	"bytes"
@@ -92,11 +92,19 @@ func KillContainer(container string) error {
 
 // Pull retrieves the docker image with 'docker pull'.
 func Pull(image string) error {
-	out, err := exec.Command("docker", "pull", image).CombinedOutput()
-	if err != nil {
-		err = fmt.Errorf("%v: %s", err, out)
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command("docker", "pull", image)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := stdout.String()
+	// TODO(mpl): if it turns out docker respects conventions and the
+	// "Authentication is required" message does come from stderr, then quit
+	// checking stdout.
+	if err != nil || stderr.Len() != 0 || strings.Contains(out, "Authentication is required") {
+		return fmt.Errorf("docker pull failed: stdout: %s, stderr: %s, err: %v", out, stderr.String(), err)
 	}
-	return err
+	return nil
 }
 
 // IP returns the IP address of the container.
@@ -189,12 +197,8 @@ func setupContainer(t *testing.T, image string, port int, timeout time.Duration,
 }
 
 const (
-	mongoImage = "mpl7/mongo"
-	// TODO(mpl): there's now an official mysql image at
-	// https://registry.hub.docker.com/_/mysql/ . We should either directly use one from
-	// there or fetch one there anyway to host it at
-	// https://console.developers.google.com/project/camlistore-website
-	mysqlImage       = "orchardup/mysql"
+	mongoImage       = "mpl7/mongo"
+	mysqlImage       = "mysql"
 	MySQLUsername    = "root"
 	MySQLPassword    = "root"
 	postgresImage    = "nornagon/postgres"
@@ -215,9 +219,9 @@ func SetupMongoContainer(t *testing.T) (c ContainerID, ip string) {
 // SetupMySQLContainer sets up a real MySQL instance for testing purposes,
 // using a Docker container. It returns the container ID and its IP address,
 // or makes the test fail on error.
-// Currently using https://index.docker.io/u/orchardup/mysql/
+// Currently using https://hub.docker.com/_/mysql/
 func SetupMySQLContainer(t *testing.T, dbname string) (c ContainerID, ip string) {
-	return setupContainer(t, mysqlImage, 3306, 10*time.Second, func() (string, error) {
+	return setupContainer(t, mysqlImage, 3306, 20*time.Second, func() (string, error) {
 		return run("-d", "-e", "MYSQL_ROOT_PASSWORD="+MySQLPassword, "-e", "MYSQL_DATABASE="+dbname, mysqlImage)
 	})
 }

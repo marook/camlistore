@@ -16,7 +16,7 @@ limitations under the License.
 
 // Command dock builds Camlistore's various Docker images.
 // It can also generate a tarball of the Camlistore server and tools.
-package main
+package main // import "camlistore.org/misc/docker"
 
 import (
 	"archive/tar"
@@ -45,12 +45,15 @@ import (
 
 var (
 	flagRev     = flag.String("rev", "", "Camlistore revision to build (tag or commit hash). For development purposes, you can instead specify the path to a local Camlistore source tree from which to build, with the form \"WIP:/path/to/dir\".")
-	flagVersion = flag.String("tarball_version", "", "For --build_image mode, the version number (e.g. 0.9) used for the release tarball name. It also defines the destination directory where the release tarball is uploaded.")
+	flagVersion = flag.String("tarball_version", "", "For --build_release mode, the version number (e.g. 0.9) used for the release tarball name. It also defines the destination directory where the release tarball is uploaded.")
 	buildOS     = flag.String("os", runtime.GOOS, "Operating system to build for. Requires --build_release.")
 
 	doImage    = flag.Bool("build_image", true, "build the Camlistore server as a docker image. Conflicts with --build_release.")
 	doUpload   = flag.Bool("upload", false, "With build_image, upload a snapshot of the server in docker as a tarball to https://storage.googleapis.com/camlistore-release/docker/. With build_release, upload the generated tarball at https://storage.googleapis.com/camlistore-release/dl/VERSION/.")
 	doBinaries = flag.Bool("build_release", false, "build the Camlistore server and tools as standalone binaries to a tarball in misc/docker/release. Requires --build_image=false.")
+
+	doZipSource = flag.Bool("zip_source", false, "pack the Camlistore source for a release in a zip file in misc/docker/release. Requires --build_image=false.")
+	flagSanity  = flag.Bool("sanity", true, "When doing --zip_source, check the source used is buildable with \"go run make.go\".")
 )
 
 // buildDockerImage builds a docker image from the Dockerfile located in
@@ -71,17 +74,19 @@ func buildDockerImage(imageDir, imageName string) {
 
 var (
 	dockDir        string
-	releaseTarball string // file path to the tarball generated with -build_release
+	releaseTarball string // file path to the tarball generated with -build_release or -zip_source
 )
 
 const (
-	goDockerImage    = "camlistore/go"
-	djpegDockerImage = "camlistore/djpeg"
-	serverImage      = "camlistore/server"
-	goCmd            = "/usr/local/go/bin/go"
+	goDockerImage       = "camlistore/go"
+	djpegDockerImage    = "camlistore/djpeg"
+	zoneinfoDockerImage = "camlistore/zoneinfo"
+	serverImage         = "camlistore/server"
+	goCmd               = "/usr/local/go/bin/go"
 	// Path to where the Camlistore builder is mounted on the camlistore/go image.
 	genCamliProgram    = "/usr/local/bin/build-camlistore-server.go"
 	genBinariesProgram = "/usr/local/bin/build-binaries.go"
+	zipSourceProgram   = "/usr/local/bin/zip-source.go"
 )
 
 func isWIP() bool {
@@ -114,10 +119,9 @@ func genCamlistore(ctxDir string) {
 		"--volume=" + ctxDir + "/camlistore.org:/OUT",
 		"--volume=" + path.Join(dockDir, "server/build-camlistore-server.go") + ":" + genCamliProgram + ":ro",
 	}
-	// TODO(mpl, bradfitz): pass the version to genCamliProgram so it can stamp it into camlistored when building it.
 	if isWIP() {
 		args = append(args, "--volume="+localCamliSource()+":/IN:ro",
-			goDockerImage, goCmd, "run", genCamliProgram, "--rev="+rev(), "--camlisource=/IN")
+			goDockerImage, goCmd, "run", genCamliProgram, "--rev=WIP:/IN")
 	} else {
 		args = append(args, goDockerImage, goCmd, "run", genCamliProgram, "--rev="+rev())
 	}
@@ -140,9 +144,12 @@ func genBinaries(ctxDir string) {
 	}
 	if isWIP() {
 		args = append(args, "--volume="+localCamliSource()+":/IN:ro",
-			image, goCmd, "run", genBinariesProgram, "--rev="+rev(), "--camlisource=/IN", "--os="+*buildOS)
+			image, goCmd, "run", genBinariesProgram, "--rev=WIP:/IN", "--os="+*buildOS)
 	} else {
 		args = append(args, image, goCmd, "run", genBinariesProgram, "--rev="+rev(), "--os="+*buildOS)
+	}
+	if *flagVersion != "" {
+		args = append(args, "--version="+*flagVersion)
 	}
 	cmd := exec.Command("docker", args...)
 	cmd.Stdout = os.Stdout
@@ -150,6 +157,44 @@ func genBinaries(ctxDir string) {
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("Error building binaries in go container: %v", err)
 	}
+	fmt.Printf("Camlistore binaries successfully generated in %v\n", filepath.Join(ctxDir, "camlistore.org", "bin"))
+}
+
+func zipSource(ctxDir string) {
+	image := goDockerImage
+	args := []string{
+		"run",
+		"--rm",
+		"--volume=" + ctxDir + ":/OUT",
+		"--volume=" + path.Join(dockDir, "release/zip-source.go") + ":" + zipSourceProgram + ":ro",
+	}
+	if isWIP() {
+		args = append(args, "--volume="+localCamliSource()+":/IN:ro",
+			image, goCmd, "run", zipSourceProgram, "--rev=WIP:/IN")
+	} else {
+		args = append(args, image, goCmd, "run", zipSourceProgram, "--rev="+rev())
+	}
+	if *flagVersion != "" {
+		args = append(args, "--version="+*flagVersion)
+	}
+	if !*flagSanity {
+		args = append(args, "--sanity=false")
+	}
+	cmd := exec.Command("docker", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("Error zipping Camlistore source in go container: %v", err)
+	}
+	setReleaseTarballName()
+	// can't use os.Rename because invalid cross-device link error likely
+	cmd = exec.Command("mv", filepath.Join(ctxDir, "camlistore-src.zip"), releaseTarball)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("Error moving source zip from %v to %v: %v", filepath.Join(ctxDir, "camlistore-src.zip"), releaseTarball, err)
+	}
+	fmt.Printf("Camlistore source successfully zipped in %v\n", releaseTarball)
 }
 
 func copyFinalDockerfile(ctxDir string) {
@@ -168,6 +213,18 @@ func genDjpeg(ctxDir string) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("Error building djpeg in go container: %v", err)
+	}
+}
+
+func genZoneinfo(ctxDir string) {
+	cmd := exec.Command("docker", "run",
+		"--rm",
+		"--volume="+ctxDir+":/OUT",
+		zoneinfoDockerImage, "/bin/bash", "-c", "mkdir -p /OUT && cp -a /usr/share/zoneinfo /OUT/zoneinfo")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("Error generating zoneinfo in go container: %v", err)
 	}
 }
 
@@ -194,8 +251,8 @@ func publicACL(proj string) []storage.ACLRule {
 }
 
 // uploadReleaseTarball uploads the generated tarball of binaries in
-// camlistore-release/VERSION/camlistoreVERSION-REV.tar.gz. It then makes a copy in
-// the same bucket and path, as camlistoreVERSION.tar.gz.
+// camlistore-release/VERSION/camlistoreVERSION-REV-CONTENTS.EXT. It then makes a copy in
+// the same bucket and path, as camlistoreVERSION-CONTENTS.EXT.
 func uploadReleaseTarball() {
 	proj := "camlistore-website"
 	bucket := "camlistore-release"
@@ -216,11 +273,11 @@ func uploadReleaseTarball() {
 	w := stoClient.Bucket(bucket).Object(versionedTarball).NewWriter(ctx)
 	w.ACL = publicACL(proj)
 	w.CacheControl = "no-cache" // TODO: remove for non-tip releases? set expirations?
+	contentType := "application/x-gtar"
 	if *buildOS == "windows" {
-		w.ContentType = "application/zip"
-	} else {
-		w.ContentType = "application/x-gtar"
+		contentType = "application/zip"
 	}
+	w.ContentType = contentType
 
 	src, err := os.Open(releaseTarball)
 	if err != nil {
@@ -237,7 +294,14 @@ func uploadReleaseTarball() {
 	log.Printf("Uploaded tarball to %s", versionedTarball)
 	if !isWIP() {
 		log.Printf("Copying tarball to %s/%s ...", bucket, tarball)
-		if _, err := stoClient.CopyObject(ctx, bucket, versionedTarball, bucket, tarball, nil); err != nil {
+		dest := stoClient.Bucket(bucket).Object(tarball)
+		if _, err := stoClient.Bucket(bucket).Object(versionedTarball).CopyTo(
+			ctx,
+			dest,
+			&storage.ObjectAttrs{
+				ACL:         publicACL(proj),
+				ContentType: contentType,
+			}); err != nil {
 			log.Fatalf("Error uploading %v: %v", tarball, err)
 		}
 		log.Printf("Uploaded tarball to %s", tarball)
@@ -302,9 +366,10 @@ func uploadDockerImage() {
 	log.Printf("Uploaded tarball to %s", versionedTarball)
 	if !isWIP() {
 		log.Printf("Copying tarball to %s/%s ...", bucket, tarball)
-		if _, err := stoClient.CopyObject(ctx,
-			bucket, versionedTarball,
-			bucket, tarball,
+		dest := stoClient.Bucket(bucket).Object(tarball)
+		if _, err := stoClient.Bucket(bucket).Object(versionedTarball).CopyTo(
+			ctx,
+			dest,
 			&storage.ObjectAttrs{
 				ACL:          publicACL(proj),
 				CacheControl: "no-cache",
@@ -325,16 +390,21 @@ func exeName(s string) string {
 
 // setReleaseTarballName sets releaseTarball.
 func setReleaseTarballName() {
-	var filename, extension string
-	if *buildOS == "windows" {
+	var filename, extension, contents string
+	if *doZipSource {
+		contents = "src"
+	} else {
+		contents = *buildOS
+	}
+	if *buildOS == "windows" || contents == "src" {
 		extension = ".zip"
 	} else {
 		extension = ".tar.gz"
 	}
 	if *flagVersion != "" {
-		filename = "camlistore" + *flagVersion + "-" + *buildOS + extension
+		filename = "camlistore" + *flagVersion + "-" + contents + extension
 	} else {
-		filename = "camlistore-" + *buildOS + extension
+		filename = "camlistore-" + contents + extension
 	}
 	releaseTarball = path.Join(dockDir, "release", filename)
 }
@@ -366,6 +436,7 @@ func packBinaries(ctxDir string) {
 				log.Fatalf("%v was not packed in tarball", name)
 			}
 		}
+		fmt.Printf("Camlistore binaries successfully packed in %v\n", releaseTarball)
 	}()
 
 	binDir := path.Join(ctxDir, "camlistore.org", "bin")
@@ -447,6 +518,26 @@ func usage() {
 	os.Exit(1)
 }
 
+// TODO(mpl): I copied numSet from genconfig.go. Move it to some *util package? go4.org?
+
+func numSet(vv ...interface{}) (num int) {
+	for _, vi := range vv {
+		switch v := vi.(type) {
+		case string:
+			if v != "" {
+				num++
+			}
+		case bool:
+			if v {
+				num++
+			}
+		default:
+			panic("unknown type")
+		}
+	}
+	return
+}
+
 func checkFlags() {
 	if flag.NArg() != 0 {
 		usage()
@@ -455,12 +546,13 @@ func checkFlags() {
 		fmt.Fprintf(os.Stderr, "Usage error: --rev is required.\n")
 		usage()
 	}
-	if *doBinaries && *doImage {
-		fmt.Fprintf(os.Stderr, "Usage error: --build_release and --build_image are mutually exclusive.\n")
+	numModes := numSet(*doBinaries, *doImage, *doZipSource)
+	if numModes != 1 {
+		fmt.Fprintf(os.Stderr, "Usage error: --build_release,  --build_image, and --zip_source are mutually exclusive.\n")
 		usage()
 	}
-	if *doBinaries && *flagVersion == "" {
-		fmt.Fprintf(os.Stderr, "Usage error: --tarball_version required when building the release tarball.\n")
+	if (*doBinaries || *doZipSource) && *doUpload && *flagVersion == "" {
+		fmt.Fprintf(os.Stderr, "Usage error: --tarball_version required for uploading the release tarball.\n")
 		usage()
 	}
 	if *doImage && *flagVersion != "" {
@@ -486,46 +578,36 @@ func main() {
 	}
 	dockDir = filepath.Join(camDir, "misc", "docker")
 
-	if *doImage {
-		buildDockerImage("go", goDockerImage)
+	buildDockerImage("go", goDockerImage)
+	// ctxDir is where we run "docker build" to produce the final
+	// "FROM scratch" Docker image.
+	ctxDir, err := ioutil.TempDir("", "camli-build")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(ctxDir)
+	switch {
+	case *doImage:
 		buildDockerImage("djpeg-static", djpegDockerImage)
-		// ctxDir is where we run "docker build" to produce the final
-		// "FROM scratch" Docker image.
-		ctxDir, err := ioutil.TempDir("", "camli-build")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer os.RemoveAll(ctxDir)
-
+		buildDockerImage("zoneinfo", zoneinfoDockerImage)
 		genCamlistore(ctxDir)
 		genDjpeg(ctxDir)
+		genZoneinfo(ctxDir)
 		buildServer(ctxDir)
-	}
-
-	// TODO(mpl): maybe *doBinaries should be done by a separate go program,
-	// because the end product is not a docker image. However, we're still
-	// using docker all along, and it's convenient for now for code reuse. I
-	// can refactor it all out of dock.go afterwards if we like the process.
-	if *doBinaries {
-		// TODO(mpl): consider using an "official" or trusted existing
-		// Go docker image, since we don't do anything special anymore in
-		// ours?
-		buildDockerImage("go", goDockerImage+"-linux")
-		ctxDir, err := ioutil.TempDir("", "camli-build")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer os.RemoveAll(ctxDir)
+	case *doBinaries:
 		genBinaries(ctxDir)
 		packBinaries(ctxDir)
+	case *doZipSource:
+		zipSource(ctxDir)
 	}
 
-	if *doUpload {
-		if *doImage {
-			uploadDockerImage()
-		} else if *doBinaries {
-			uploadReleaseTarball()
-		}
+	if !*doUpload {
+		return
+	}
+	if *doImage {
+		uploadDockerImage()
+	} else {
+		uploadReleaseTarball()
 	}
 }
 

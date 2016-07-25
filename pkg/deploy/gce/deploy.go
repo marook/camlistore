@@ -15,10 +15,7 @@ limitations under the License.
 */
 
 // Package gce provides tools to deploy Camlistore on Google Compute Engine.
-package gce
-
-// TODO: we want to host our own docker images under gs://camlistore-release/docker, so we should make a
-// list. For the purposes of this package, we should add mysql to the list.
+package gce // import "camlistore.org/pkg/deploy/gce"
 
 import (
 	"bytes"
@@ -38,7 +35,6 @@ import (
 	"sync"
 	"time"
 
-	"camlistore.org/pkg/constants/google"
 	"camlistore.org/pkg/httputil"
 	"camlistore.org/pkg/osutil"
 	"golang.org/x/net/context"
@@ -46,6 +42,7 @@ import (
 	"go4.org/cloud/google/gceutil"
 	"go4.org/syncutil"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	// TODO(mpl): switch to google.golang.org/cloud/compute
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
@@ -117,7 +114,6 @@ type InstanceConf struct {
 	CertFile string // HTTPS certificate file.
 	KeyFile  string // HTTPS key file.
 	Hostname string // Fully qualified domain name.
-	Password string // HTTP basic auth password for user "camlistore"; empty means random
 
 	configDir string // bucketBase() + "/config"
 	blobDir   string // bucketBase() + "/blobs"
@@ -289,7 +285,6 @@ func (d *Deployer) Create(ctx context.Context) (*compute.Instance, error) {
 		return nil, fmt.Errorf("cloud config length of %d bytes is over %d byte limit", len(config), maxCloudConfig)
 	}
 
-	// TODO(mpl): maybe add a wipe mode where we erase other instances before attempting to create.
 	if zone, err := d.projectHasInstance(); zone != "" {
 		return nil, instanceExistsError{
 			project: d.Conf.Project,
@@ -326,15 +321,6 @@ func (d *Deployer) Create(ctx context.Context) (*compute.Instance, error) {
 	return inst, nil
 }
 
-// TODO(bradfitz,mpl): stop generating a password on camlistore.org
-// and have the instance create its own password on first boot
-// instead. We shouldn't even ask users for the initial optional
-// password, though. But let's not block the 0.9 release on this
-// because regardless the users are already trusting us with their GCE
-// OAuth scope to create their instance (so if we were evil we could
-// do whatever already). But it raises unnecessary questions. Once we do
-// ACME (LetsEncrypt.org) on their instance, we also don't need to
-// generate their TLS certs for them.
 func randPassword() string {
 	buf := make([]byte, 5)
 	if n, err := rand.Read(buf); err != nil || n != len(buf) {
@@ -358,10 +344,6 @@ func (d *Deployer) createInstance(computeService *compute.Service, ctx context.C
 	prefix := projectsAPIURL + d.Conf.Project
 	machType := prefix + "/zones/" + d.Conf.Zone + "/machineTypes/" + d.Conf.Machine
 	config := cloudConfig(d.Conf)
-	password := d.Conf.Password
-	if password == "" {
-		password = randPassword()
-	}
 	instance := &compute.Instance{
 		Name:        d.Conf.Name,
 		Description: "Camlistore server",
@@ -388,7 +370,7 @@ func (d *Deployer) createInstance(computeService *compute.Service, ctx context.C
 				},
 				{
 					Key:   "camlistore-password",
-					Value: googleapi.String(password),
+					Value: googleapi.String(randPassword()),
 				},
 				{
 					Key:   "camlistore-blob-dir",
@@ -663,6 +645,9 @@ func (d *Deployer) setFirewall(ctx context.Context, computeService *compute.Serv
 	}
 	return wg.Err()
 }
+
+// TODO(bradfitz,mpl): Once we do ACME (LetsEncrypt.org) on their instance, we
+// don't need to generate their TLS certs for them in setupHTTPS.
 
 // setupHTTPS uploads to the configuration bucket the certificate and key used by the
 // instance for HTTPS. It generates them if d.Conf.CertFile or d.Conf.KeyFile is not defined.

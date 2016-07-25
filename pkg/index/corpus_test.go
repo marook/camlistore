@@ -25,12 +25,12 @@ import (
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/index"
 	"camlistore.org/pkg/index/indextest"
-	"camlistore.org/pkg/types"
 	"camlistore.org/pkg/types/camtypes"
+	"go4.org/types"
 	"golang.org/x/net/context"
 )
 
-func TestCorpusAppendPermanodeAttrValues(t *testing.T) {
+func newTestCorpusWithPermanode() (*index.Corpus, blob.Ref) {
 	c := index.ExpNewCorpus()
 	pn := blob.MustParse("abc-123")
 	tm := time.Unix(99, 0)
@@ -43,37 +43,51 @@ func TestCorpusAppendPermanodeAttrValues(t *testing.T) {
 			Date:  tm,
 		}
 	}
-	s := func(s ...string) []string { return s }
 
-	c.SetClaims(pn, &index.PermanodeMeta{
-		Claims: []*camtypes.Claim{
-			claim("set", "foo", "foov"), // time 100
+	c.SetClaims(pn, []*camtypes.Claim{
+		claim("set", "foo", "foov"), // time 100
 
-			claim("add", "tag", "a"), // time 101
-			claim("add", "tag", "b"), // time 102
-			claim("del", "tag", ""),
-			claim("add", "tag", "c"),
-			claim("add", "tag", "d"),
-			claim("add", "tag", "e"),
-			claim("del", "tag", "d"),
+		claim("add", "tag", "a"), // time 101
+		claim("add", "tag", "b"), // time 102
+		claim("del", "tag", ""),
+		claim("add", "tag", "c"),
+		claim("add", "tag", "d"),
+		claim("add", "tag", "e"),
+		claim("del", "tag", "d"),
 
-			claim("add", "DelAll", "a"),
-			claim("add", "DelAll", "b"),
-			claim("add", "DelAll", "c"),
-			claim("del", "DelAll", ""),
+		claim("add", "DelAll", "a"),
+		claim("add", "DelAll", "b"),
+		claim("add", "DelAll", "c"),
+		claim("del", "DelAll", ""),
 
-			claim("add", "DelOne", "a"),
-			claim("add", "DelOne", "b"),
-			claim("add", "DelOne", "c"),
-			claim("add", "DelOne", "d"),
-			claim("del", "DelOne", "d"),
-			claim("del", "DelOne", "a"),
+		claim("add", "DelOne", "a"),
+		claim("add", "DelOne", "b"),
+		claim("add", "DelOne", "c"),
+		claim("add", "DelOne", "d"),
+		claim("del", "DelOne", "d"),
+		claim("del", "DelOne", "a"),
 
-			claim("add", "SetAfterAdd", "a"),
-			claim("add", "SetAfterAdd", "b"),
-			claim("set", "SetAfterAdd", "setv"),
+		claim("add", "SetAfterAdd", "a"),
+		claim("add", "SetAfterAdd", "b"),
+		claim("set", "SetAfterAdd", "setv"),
+
+		// add an element with fixed time to test
+		// slow and fast path equivalence
+		// (lookups based on pm.Claims and pm.Attrs, respectively)
+		{
+			Type:  "set-attribute",
+			Attr:  "CacheTest",
+			Value: "foo",
+			Date:  time.Unix(201, 0),
 		},
 	})
+
+	return c, pn
+}
+
+func TestCorpusAppendPermanodeAttrValues(t *testing.T) {
+	c, pn := newTestCorpusWithPermanode()
+	s := func(s ...string) []string { return s }
 
 	tests := []struct {
 		attr string
@@ -97,8 +111,99 @@ func TestCorpusAppendPermanodeAttrValues(t *testing.T) {
 			t.Errorf("%d. attr %q = %q; want %q",
 				i, tt.attr, got, tt.want)
 		}
-	}
 
+		if !tt.t.IsZero() {
+			// skip equivalence test if specific time was given
+			continue
+		}
+		got = c.AppendPermanodeAttrValues(nil, pn, tt.attr, time.Unix(200, 0), blob.Ref{})
+		if len(got) == 0 && len(tt.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%d. attr %q = %q; want %q",
+				i, tt.attr, got, tt.want)
+		}
+	}
+}
+
+func TestCorpusPermanodeAttrValue(t *testing.T) {
+	c, pn := newTestCorpusWithPermanode()
+
+	tests := []struct {
+		attr string
+		want string
+		t    time.Time
+	}{
+		{attr: "not-exist", want: ""},
+		{attr: "DelAll", want: ""},
+		{attr: "DelOne", want: "b"},
+		{attr: "foo", want: "foov"},
+		{attr: "tag", want: "c"},
+		{attr: "tag", want: "a", t: time.Unix(102, 0)},
+		{attr: "SetAfterAdd", want: "setv"},
+	}
+	for i, tt := range tests {
+		got := c.PermanodeAttrValue(pn, tt.attr, tt.t, blob.Ref{})
+		if len(got) == 0 && len(tt.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%d. attr %q = %q; want %q",
+				i, tt.attr, got, tt.want)
+		}
+
+		if !tt.t.IsZero() {
+			// skip equivalence test if specific time was given
+			continue
+		}
+		got = c.PermanodeAttrValue(pn, tt.attr, time.Unix(200, 0), blob.Ref{})
+		if len(got) == 0 && len(tt.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%d. attr %q = %q; want %q",
+				i, tt.attr, got, tt.want)
+		}
+	}
+}
+
+func TestCorpusPermanodeHasAttrValue(t *testing.T) {
+	c, pn := newTestCorpusWithPermanode()
+
+	tests := []struct {
+		attr string
+		val  string
+		want bool
+		t    time.Time
+	}{
+		{attr: "DelAll", val: "a", want: false},
+		{attr: "DelOne", val: "b", want: true},
+		{attr: "DelOne", val: "a", want: false},
+		{attr: "foo", val: "foov", want: true},
+		{attr: "tag", val: "c", want: true},
+		{attr: "tag", val: "a", want: true, t: time.Unix(102, 0)},
+		{attr: "tag", val: "c", want: false, t: time.Unix(102, 0)},
+		{attr: "SetAfterAdd", val: "setv", want: true},
+		{attr: "SetAfterAdd", val: "a", want: false},
+	}
+	for _, tt := range tests {
+		got := c.PermanodeHasAttrValue(pn, tt.t, tt.attr, tt.val)
+		if got != tt.want {
+			t.Errorf("attr %q, val %q = %v; want %v",
+				tt.attr, tt.val, got, tt.want)
+		}
+
+		if !tt.t.IsZero() {
+			// skip equivalence test if specific time was given
+			continue
+		}
+		got = c.PermanodeHasAttrValue(pn, time.Unix(200, 0), tt.attr, tt.val)
+		if got != tt.want {
+			t.Errorf("attr %q, val %q = %v; want %v",
+				tt.attr, tt.val, got, tt.want)
+		}
+	}
 }
 
 func TestKVClaimAllocs(t *testing.T) {
@@ -147,7 +252,7 @@ func TestKVClaim(t *testing.T) {
 func TestDeletePermanode_Modtime(t *testing.T) {
 	testDeletePermanodes(t,
 		func(c *index.Corpus, ctx context.Context, ch chan<- camtypes.BlobMeta) error {
-			return c.EnumeratePermanodesLastModifiedLocked(ctx, ch)
+			return c.EnumeratePermanodesLastModified(ctx, ch)
 		},
 	)
 }
@@ -155,7 +260,7 @@ func TestDeletePermanode_Modtime(t *testing.T) {
 func TestDeletePermanode_CreateTime(t *testing.T) {
 	testDeletePermanodes(t,
 		func(c *index.Corpus, ctx context.Context, ch chan<- camtypes.BlobMeta) error {
-			return c.EnumeratePermanodesCreatedLocked(ctx, ch, true)
+			return c.EnumeratePermanodesCreated(ctx, ch, true)
 		},
 	)
 }
@@ -183,13 +288,12 @@ func testDeletePermanodes(t *testing.T,
 	ch := make(chan camtypes.BlobMeta, 10)
 	var got []camtypes.BlobMeta
 	errc := make(chan error, 1)
-	c.RLock()
-	go func() { errc <- enumFunc(c, context.TODO(), ch) }()
+	ctx := context.Background()
+	go func() { errc <- enumFunc(c, ctx, ch) }()
 	for blobMeta := range ch {
 		got = append(got, blobMeta)
 	}
 	err = <-errc
-	c.RUnlock()
 	if err != nil {
 		t.Fatalf("Could not enumerate permanodes: %v", err)
 	}
@@ -214,13 +318,11 @@ func testDeletePermanodes(t *testing.T,
 	want = []blob.Ref{foopn}
 	got = got[:0]
 	ch = make(chan camtypes.BlobMeta, 10)
-	c.RLock()
-	go func() { errc <- enumFunc(c, context.TODO(), ch) }()
+	go func() { errc <- enumFunc(c, context.Background(), ch) }()
 	for blobMeta := range ch {
 		got = append(got, blobMeta)
 	}
 	err = <-errc
-	c.RUnlock()
 	if err != nil {
 		t.Fatalf("Could not enumerate permanodes: %v", err)
 	}
@@ -236,13 +338,11 @@ func testDeletePermanodes(t *testing.T,
 	want = []blob.Ref{foopn, bazpn}
 	got = got[:0]
 	ch = make(chan camtypes.BlobMeta, 10)
-	c.RLock()
-	go func() { errc <- enumFunc(c, context.TODO(), ch) }()
+	go func() { errc <- enumFunc(c, context.Background(), ch) }()
 	for blobMeta := range ch {
 		got = append(got, blobMeta)
 	}
 	err = <-errc
-	c.RUnlock()
 	if err != nil {
 		t.Fatalf("Could not enumerate permanodes: %v", err)
 	}
@@ -266,7 +366,7 @@ func testDeletePermanodes(t *testing.T,
 func TestEnumerateOrder_Modtime(t *testing.T) {
 	testEnumerateOrder(t,
 		func(c *index.Corpus, ctx context.Context, ch chan<- camtypes.BlobMeta) error {
-			return c.EnumeratePermanodesLastModifiedLocked(ctx, ch)
+			return c.EnumeratePermanodesLastModified(ctx, ch)
 		},
 		modtimeOrder,
 	)
@@ -275,7 +375,7 @@ func TestEnumerateOrder_Modtime(t *testing.T) {
 func TestEnumerateOrder_CreateTime(t *testing.T) {
 	testEnumerateOrder(t,
 		func(c *index.Corpus, ctx context.Context, ch chan<- camtypes.BlobMeta) error {
-			return c.EnumeratePermanodesCreatedLocked(ctx, ch, true)
+			return c.EnumeratePermanodesCreated(ctx, ch, true)
 		},
 		createOrder,
 	)
@@ -321,13 +421,12 @@ func testEnumerateOrder(t *testing.T,
 	ch := make(chan camtypes.BlobMeta, 10)
 	var got []camtypes.BlobMeta
 	errc := make(chan error, 1)
-	c.RLock()
-	go func() { errc <- enumFunc(c, context.TODO(), ch) }()
+	ctx := context.Background()
+	go func() { errc <- enumFunc(c, ctx, ch) }()
 	for blobMeta := range ch {
 		got = append(got, blobMeta)
 	}
 	err = <-errc
-	c.RUnlock()
 	if err != nil {
 		t.Fatalf("Could not enumerate permanodes: %v", err)
 	}
@@ -345,7 +444,7 @@ func testEnumerateOrder(t *testing.T,
 func TestCacheSortedPermanodes_ModtimeRace(t *testing.T) {
 	testCacheSortedPermanodesRace(t,
 		func(c *index.Corpus, ctx context.Context, ch chan<- camtypes.BlobMeta) error {
-			return c.EnumeratePermanodesLastModifiedLocked(ctx, ch)
+			return c.EnumeratePermanodesLastModified(ctx, ch)
 		},
 	)
 }
@@ -354,7 +453,7 @@ func TestCacheSortedPermanodes_ModtimeRace(t *testing.T) {
 func TestCacheSortedPermanodes_CreateTimeRace(t *testing.T) {
 	testCacheSortedPermanodesRace(t,
 		func(c *index.Corpus, ctx context.Context, ch chan<- camtypes.BlobMeta) error {
-			return c.EnumeratePermanodesCreatedLocked(ctx, ch, true)
+			return c.EnumeratePermanodesCreated(ctx, ch, true)
 		},
 	)
 }
@@ -372,6 +471,8 @@ func testCacheSortedPermanodesRace(t *testing.T,
 	go func() {
 		for i := 0; i < 100; i++ {
 			nth := fmt.Sprintf("%d", i)
+			// No need to lock the index here. It is already done within NewPlannedPermanode,
+			// because it calls idxd.Index.ReceiveBlob.
 			pn := idxd.NewPlannedPermanode(nth)
 			idxd.SetAttribute(pn, "tag", nth)
 		}
@@ -381,12 +482,14 @@ func testCacheSortedPermanodesRace(t *testing.T,
 		for i := 0; i < 10; i++ {
 			ch := make(chan camtypes.BlobMeta, 10)
 			errc := make(chan error, 1)
-			c.RLock()
-			go func() { errc <- enumFunc(c, context.TODO(), ch) }()
-			for _ = range ch {
+			go func() {
+				idx.RLock()
+				defer idx.RUnlock()
+				errc <- enumFunc(c, context.TODO(), ch)
+			}()
+			for range ch {
 			}
 			err := <-errc
-			c.RUnlock()
 			if err != nil {
 				t.Fatalf("Could not enumerate permanodes: %v", err)
 			}
@@ -414,15 +517,15 @@ func TestLazySortedPermanodes(t *testing.T) {
 	pn := idxd.NewPlannedPermanode("one")
 	idxd.SetAttribute(pn, "tag", "one")
 
+	ctx := context.Background()
 	enum := func(reverse bool) {
 		ch := make(chan camtypes.BlobMeta, 10)
 		errc := make(chan error, 1)
-		c.RLock()
-		go func() { errc <- c.EnumeratePermanodesCreatedLocked(context.TODO(), ch, reverse) }()
-		for _ = range ch {
+		go func() { errc <- c.EnumeratePermanodesCreated(ctx, ch, reverse) }()
+		for range ch {
 		}
 		err := <-errc
-		c.RUnlock()
+
 		if err != nil {
 			t.Fatalf("Could not enumerate permanodes: %v", err)
 		}

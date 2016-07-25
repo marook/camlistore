@@ -36,37 +36,43 @@ import (
 	"testing"
 	"time"
 
+	"bazil.org/fuse"
+	"bazil.org/fuse/syscallx"
 	"camlistore.org/pkg/test"
-	"camlistore.org/third_party/bazil.org/fuse/syscallx"
 )
 
 var (
-	errmu   sync.Mutex
-	lasterr error
+	errmu         sync.Mutex
+	osxFuseMarker string
 )
 
 func condSkip(t *testing.T) {
 	errmu.Lock()
 	defer errmu.Unlock()
-	if lasterr != nil {
-		t.Skipf("Skipping test; some other test already failed.")
-	}
 	if !(runtime.GOOS == "darwin" || runtime.GOOS == "linux") {
 		t.Skipf("Skipping test on OS %q", runtime.GOOS)
 	}
 	if runtime.GOOS == "darwin" {
-		_, err := os.Stat("/Library/Filesystems/osxfusefs.fs/Support/mount_osxfusefs")
-		if os.IsNotExist(err) {
-			test.DependencyErrorOrSkip(t)
-		} else if err != nil {
+		// TODO: simplify if/when bazil drops 2.x support.
+		_, err := os.Stat(fuse.OSXFUSELocationV3.Mount)
+		if err == nil {
+			osxFuseMarker = "cammount@osxfuse"
+			return
+		}
+		if !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-	}
-}
-
-func brokenTest(t *testing.T) {
-	if v, _ := strconv.ParseBool(os.Getenv("RUN_BROKEN_TESTS")); !v {
-		t.Skipf("Skipping broken tests without RUN_BROKEN_TESTS=1")
+		_, err = os.Stat(fuse.OSXFUSELocationV2.Mount)
+		if err == nil {
+			osxFuseMarker = "mount_osxfusefs@"
+			// TODO(mpl): add a similar check/warning to pkg/fs or cammount.
+			t.Log("OSXFUSE version 2.x detected. Please consider upgrading to v 3.x.")
+			return
+		}
+		if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		test.DependencyErrorOrSkip(t)
 	}
 }
 
@@ -664,10 +670,7 @@ func dirToBeFUSE(dir string) func() bool {
 			return false
 		}
 		if runtime.GOOS == "darwin" {
-			if strings.Contains(string(out), "mount_osxfusefs@") {
-				return true
-			}
-			return false
+			return strings.Contains(string(out), osxFuseMarker)
 		}
 		if runtime.GOOS == "linux" {
 			return strings.Contains(string(out), "/dev/fuse") &&

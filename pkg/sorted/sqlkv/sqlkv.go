@@ -15,19 +15,19 @@ limitations under the License.
 */
 
 // Package sqlkv implements the sorted.KeyValue interface using an *sql.DB.
-package sqlkv
+package sqlkv // import "camlistore.org/pkg/sorted/sqlkv"
 
 import (
 	"database/sql"
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"sync"
 
 	"camlistore.org/pkg/leak"
 	"camlistore.org/pkg/sorted"
+	"go4.org/syncutil"
 )
 
 // KeyValue implements the sorted.KeyValue interface using an *sql.DB.
@@ -42,19 +42,20 @@ type KeyValue struct {
 	// with the right ones for the rdbms in use.
 	PlaceHolderFunc func(string) string
 
-	// Serial determines whether a Go-level mutex protects DB from
-	// concurrent access.  This isn't perfect and exists just for
-	// SQLite, whose driver likes to return "the database is
-	// locked" (camlistore.org/issue/114), so this keeps some
-	// pressure off. But we still trust SQLite to deal with
-	// concurrency in most cases.
-	Serial bool
+	// Gate optionally limits concurrent access.
+	//
+	// This originally existed just for SQLite, whose driver likes
+	// to return "the database is locked"
+	// (camlistore.org/issue/114), so this keeps some pressure
+	// off. But we still trust SQLite to deal with concurrency in
+	// most cases.
+	//
+	// It's also used to limit the number of MySQL connections.
+	Gate *syncutil.Gate
 
 	// TablePrefix optionally provides a prefix for SQL table
 	// names. This is typically "dbname.", ending in a period.
 	TablePrefix string
-
-	mu sync.Mutex // the mutex used, if Serial is set
 
 	queriesInitOnce sync.Once // guards initialization of both queries and replacer
 	replacer        *strings.Replacer
@@ -126,8 +127,8 @@ func (b *batchTx) Delete(key string) {
 }
 
 func (kv *KeyValue) BeginBatch() sorted.BatchMutation {
-	if kv.Serial {
-		kv.mu.Lock()
+	if kv.Gate != nil {
+		kv.Gate.Start()
 	}
 	tx, err := kv.DB.Begin()
 	if err != nil {
@@ -141,23 +142,26 @@ func (kv *KeyValue) BeginBatch() sorted.BatchMutation {
 }
 
 func (kv *KeyValue) CommitBatch(b sorted.BatchMutation) error {
-	if kv.Serial {
-		defer kv.mu.Unlock()
+	if kv.Gate != nil {
+		defer kv.Gate.Done()
 	}
 	bt, ok := b.(*batchTx)
 	if !ok {
 		return fmt.Errorf("wrong BatchMutation type %T", b)
 	}
 	if bt.err != nil {
+		if err := bt.tx.Rollback(); err != nil {
+			log.Printf("Transaction rollback error: %v", err)
+		}
 		return bt.err
 	}
 	return bt.tx.Commit()
 }
 
 func (kv *KeyValue) Get(key string) (value string, err error) {
-	if kv.Serial {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
+	if kv.Gate != nil {
+		kv.Gate.Start()
+		defer kv.Gate.Done()
 	}
 	err = kv.DB.QueryRow(kv.sql("SELECT v FROM /*TPRE*/rows WHERE k=?"), key).Scan(&value)
 	if err == sql.ErrNoRows {
@@ -170,9 +174,9 @@ func (kv *KeyValue) Set(key, value string) error {
 	if err := sorted.CheckSizes(key, value); err != nil {
 		return err
 	}
-	if kv.Serial {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
+	if kv.Gate != nil {
+		kv.Gate.Start()
+		defer kv.Gate.Done()
 	}
 	if kv.SetFunc != nil {
 		return kv.SetFunc(kv.DB, key, value)
@@ -182,18 +186,18 @@ func (kv *KeyValue) Set(key, value string) error {
 }
 
 func (kv *KeyValue) Delete(key string) error {
-	if kv.Serial {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
+	if kv.Gate != nil {
+		kv.Gate.Start()
+		defer kv.Gate.Done()
 	}
 	_, err := kv.DB.Exec(kv.sql("DELETE FROM /*TPRE*/rows WHERE k=?"), key)
 	return err
 }
 
 func (kv *KeyValue) Wipe() error {
-	if kv.Serial {
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
+	if kv.Gate != nil {
+		kv.Gate.Start()
+		defer kv.Gate.Done()
 	}
 	_, err := kv.DB.Exec(kv.sql("DELETE FROM /*TPRE*/rows"))
 	return err
@@ -202,12 +206,10 @@ func (kv *KeyValue) Wipe() error {
 func (kv *KeyValue) Close() error { return kv.DB.Close() }
 
 func (kv *KeyValue) Find(start, end string) sorted.Iterator {
-	if kv.Serial {
-		kv.mu.Lock()
-		// TODO(mpl): looks like sqlite considers the db locked until we've closed
-		// the iterator, so we can't do anything else until then. We should probably
-		// move that Unlock to the closing of the iterator. Investigating.
-		defer kv.mu.Unlock()
+	var releaseGate func() // nil if unused
+	if kv.Gate != nil {
+		kv.Gate.Start()
+		releaseGate = kv.Gate.Done
 	}
 	var rows *sql.Rows
 	var err error
@@ -222,22 +224,21 @@ func (kv *KeyValue) Find(start, end string) sorted.Iterator {
 	}
 
 	it := &iter{
-		kv:         kv,
-		rows:       rows,
-		closeCheck: leak.NewChecker(),
+		kv:          kv,
+		rows:        rows,
+		closeCheck:  leak.NewChecker(),
+		releaseGate: releaseGate,
 	}
 	return it
 }
 
-var wordThenPunct = regexp.MustCompile(`^\w+\W$`)
-
 // iter is a iterator over sorted key/value pairs in rows.
 type iter struct {
 	kv  *KeyValue
-	end string // optional end bound
-	err error  // accumulated error, returned at Close
+	err error // accumulated error, returned at Close
 
-	closeCheck *leak.Checker
+	closeCheck  *leak.Checker
+	releaseGate func() // if non-nil, called on Close
 
 	rows *sql.Rows // if non-nil, the rows we're reading from
 
@@ -273,6 +274,9 @@ func (t *iter) Close() error {
 	if t.rows != nil {
 		t.rows.Close()
 		t.rows = nil
+	}
+	if t.releaseGate != nil {
+		t.releaseGate()
 	}
 	err := t.err
 	t.err = errClosed

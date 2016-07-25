@@ -30,7 +30,8 @@ import (
 	"camlistore.org/pkg/magic"
 	"camlistore.org/pkg/schema"
 	"camlistore.org/pkg/search"
-	"camlistore.org/pkg/types"
+	"go4.org/readerutil"
+	"golang.org/x/net/context"
 )
 
 const oneYear = 365 * 86400 * time.Second
@@ -63,8 +64,10 @@ type fileInfo struct {
 }
 
 func (dh *DownloadHandler) fileInfo(req *http.Request, file blob.Ref) (fi fileInfo, packed bool, err error) {
+	ctx := context.TODO()
+
 	// Fast path for blobpacked.
-	fi, ok := fileInfoPacked(dh.Search, dh.Fetcher, req, file)
+	fi, ok := fileInfoPacked(ctx, dh.Search, dh.Fetcher, req, file)
 	if debugPack {
 		log.Printf("download.go: fileInfoPacked: ok=%v, %+v", ok, fi)
 	}
@@ -92,7 +95,7 @@ func (dh *DownloadHandler) fileInfo(req *http.Request, file blob.Ref) (fi fileIn
 }
 
 // Fast path for blobpacked.
-func fileInfoPacked(sh *search.Handler, src blob.Fetcher, req *http.Request, file blob.Ref) (packFileInfo fileInfo, ok bool) {
+func fileInfoPacked(ctx context.Context, sh *search.Handler, src blob.Fetcher, req *http.Request, file blob.Ref) (packFileInfo fileInfo, ok bool) {
 	if sh == nil {
 		return fileInfo{whyNot: "no search"}, false
 	}
@@ -105,7 +108,7 @@ func fileInfoPacked(sh *search.Handler, src blob.Fetcher, req *http.Request, fil
 		// considering rarity.
 		return fileInfo{whyNot: "range header"}, false
 	}
-	des, err := sh.Describe(&search.DescribeRequest{BlobRef: file})
+	des, err := sh.Describe(ctx, &search.DescribeRequest{BlobRef: file})
 	if err != nil {
 		log.Printf("ui: fileInfoPacked: skipping fast path due to error from search: %v", err)
 		return fileInfo{whyNot: "search error"}, false
@@ -136,7 +139,7 @@ func fileInfoPacked(sh *search.Handler, src blob.Fetcher, req *http.Request, fil
 		mime:  fi.MIMEType,
 		name:  fi.FileName,
 		size:  fi.Size,
-		rs:    types.NewFakeSeeker(rc, fi.Size-offset),
+		rs:    readerutil.NewFakeSeeker(rc, fi.Size-offset),
 		close: rc.Close,
 	}, true
 }

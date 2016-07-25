@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package sqlite provides an implementation of sorted.KeyValue
 // using an SQLite database file.
-package sqlite
+package sqlite // import "camlistore.org/pkg/sorted/sqlite"
 
 import (
 	"database/sql"
@@ -28,10 +28,17 @@ import (
 	"camlistore.org/pkg/sorted"
 	"camlistore.org/pkg/sorted/sqlkv"
 	"go4.org/jsonconfig"
+	"go4.org/syncutil"
 )
 
 func init() {
 	sorted.RegisterKeyValue("sqlite", newKeyValueFromConfig)
+}
+
+// NewStorage is a convenience that calls newKeyValueFromConfig
+// with file as the sqlite storage file.
+func NewStorage(file string) (sorted.KeyValue, error) {
+	return newKeyValueFromConfig(jsonconfig.Obj{"file": file})
 }
 
 func newKeyValueFromConfig(cfg jsonconfig.Obj) (sorted.KeyValue, error) {
@@ -58,8 +65,8 @@ func newKeyValueFromConfig(cfg jsonconfig.Obj) (sorted.KeyValue, error) {
 		file: file,
 		db:   db,
 		KeyValue: &sqlkv.KeyValue{
-			DB:     db,
-			Serial: true,
+			DB:   db,
+			Gate: syncutil.NewGate(1),
 		},
 	}
 

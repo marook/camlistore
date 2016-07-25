@@ -25,7 +25,7 @@ import (
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/httputil"
 	"camlistore.org/pkg/schema"
-	"camlistore.org/pkg/types"
+	"go4.org/types"
 )
 
 // uploadHelperResponse is the response from serveUploadHelper.
@@ -46,7 +46,7 @@ func (ui *UIHandler) serveUploadHelper(rw http.ResponseWriter, req *http.Request
 		return
 	}
 
-	mr, err := httputil.MultipartReader(req)
+	mr, err := req.MultipartReader()
 	if err != nil {
 		httputil.ServeJSONError(rw, httputil.ServerError("reading body: "+err.Error()))
 		return

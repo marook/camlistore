@@ -207,7 +207,7 @@ func printConfigChangeHelp(conf jsonconfig.Obj) {
 		}
 	}
 	if oldConfig {
-		configChangedMsg += "Please see http://camlistore.org/docs/client-config, or use camput init to recreate a default one."
+		configChangedMsg += "Please see https://camlistore.org/doc/client-config, or use camput init to recreate a default one."
 		log.Print(configChangedMsg)
 	}
 }
@@ -285,14 +285,6 @@ func defaultServer() string {
 		}
 	}
 	return ""
-}
-
-func (c *Client) serverOrDefault() string {
-	configOnce.Do(parseConfig)
-	if c.server != "" {
-		return cleanServer(c.server)
-	}
-	return defaultServer()
 }
 
 func (c *Client) useTLS() bool {
@@ -561,21 +553,27 @@ func hasDirPrefix(dirPrefix, fullpath string) bool {
 	return false
 }
 
-// hasComponent returns whether the pathComponent is a path component of fullpath. i.e it is a part of fullpath that fits exactly between two path separators.
+// hasComponent returns whether the pathComponent is a path component of
+// fullpath. i.e it is a part of fullpath that fits exactly between two path
+// separators.
 func hasComponent(component, fullpath string) bool {
-	idx := strings.Index(fullpath, component)
-	if idx == -1 {
-		return false
+	// trim Windows volume name
+	fullpath = strings.TrimPrefix(fullpath, filepath.VolumeName(fullpath))
+	for {
+		i := strings.Index(fullpath, component)
+		if i == -1 {
+			return false
+		}
+		if i != 0 && fullpath[i-1] == filepath.Separator {
+			componentEnd := i + len(component)
+			if componentEnd == len(fullpath) {
+				return true
+			}
+			if fullpath[componentEnd] == filepath.Separator {
+				return true
+			}
+		}
+		fullpath = fullpath[i+1:]
 	}
-	if fullpath[idx-1] != filepath.Separator {
-		return false
-	}
-	componentEnd := idx + len(component)
-	if componentEnd == len(fullpath) {
-		return true
-	}
-	if fullpath[componentEnd] == filepath.Separator {
-		return true
-	}
-	return false
+	panic("unreachable")
 }
