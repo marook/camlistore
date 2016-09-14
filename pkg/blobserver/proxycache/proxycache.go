@@ -120,6 +120,7 @@ func (sto *sto) touchBlob(sb blob.SizedRef) {
 	}
 	if sto.cacheBytes > sto.maxCacheBytes {
 		// TODO: clean some stuff.
+		// TODO use sto.origin.RemoveBlobs(blobs []blob.Ref)
 	}
 }
 
@@ -132,7 +133,7 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 	if err != os.ErrNotExist {
 		log.Printf("warning: proxycache cache fetch error for %v: %v", b, err)
 	}
-	rc, size, err = sto.cache.Fetch(b)
+	rc, size, err = sto.origin.Fetch(b)
 	if err != nil {
 		return
 	}
