@@ -86,14 +86,34 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 	if err != nil {
 		return nil, err
 	}
+	cacheBytes := int64(0)
+	// initialize with true because if kv is empty we will rebuild kv from cache
+	rebuildKv := true
+	kvIt := kv.Find("", "")
+	for kvIt.Next() {
+		rebuildKv = false
+		val := kvIt.Value()
+		var entrySize, entryAccessTimestamp int
+		nTokens, err := fmt.Sscanf(val, "%d:%d", &entrySize, &entryAccessTimestamp)
+		if err != nil || nTokens != 2 {
+			log.Printf("Error in proxycache kv => rebuilding it: %v", err)
+			rebuildKv = true
+			break
+		}
+		cacheBytes += int64(entrySize)
+	}
+	if(rebuildKv){
+		// TODO remove all entries from kv
+		// TODO scan through cache and fill kv
+	}
 
-	// TODO: enumerate through kv and calculate current size.
-	// Maybe also even enumerate through cache to see if they match.
-	// Or even: keep it only in memory and not in kv?
+	// TODO: enumerate through kv and calculate current size. (done)
+	// Maybe also even enumerate through cache to see if they match. (open)
 
 	s := &sto{
 		origin:        originSto,
 		cache:         cacheSto,
+		cacheBytes:    cacheBytes,
 		maxCacheBytes: maxCacheBytes,
 		kv:            kv,
 	}
