@@ -288,6 +288,7 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 	rc, size, err = sto.cache.Fetch(b)
 	if err == nil {
 		sto.touchBlob(blob.SizedRef{Ref: b, Size: size})
+		log.Printf(">>>>>> fetch from cache %v", b)
 		return
 	}
 	if err != os.ErrNotExist {
@@ -307,6 +308,7 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 			return
 		}
 		sto.touchBlob(blob.SizedRef{Ref: b, Size: size})
+		log.Printf(">>>>>> fetch from origin %v", b)
 	}()
 	return ioutil.NopCloser(bytes.NewReader(all)), size, nil
 }
