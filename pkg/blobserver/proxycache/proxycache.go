@@ -272,9 +272,11 @@ func (sto *sto) touchBlob(sb blob.SizedRef) {
 func (sto *sto) EnforceCacheLimits() {
 	if sto.cacheBytes > sto.maxCacheBytes {
 		deletedRefs := []blob.Ref{}
+		kvBatch := sto.kv.BeginBatch()
 		for sto.cacheBytes > sto.maxCacheBytes {
 			droppedBlobAccess := heap.Pop(&sto.blobAccessHeap).(*BlobAccess)
 			delete(sto.blobAccessMap, droppedBlobAccess.ref)
+			kvBatch.Delete(droppedBlobAccess.ref.String())
 			
 			sto.cacheBytes -= int64(droppedBlobAccess.blobSize)
 			
@@ -283,6 +285,7 @@ func (sto *sto) EnforceCacheLimits() {
 			deletedRefs = append(deletedRefs, droppedBlobAccess.ref)
 		}
 		sto.cache.RemoveBlobs(deletedRefs)
+		sto.kv.CommitBatch(kvBatch)
 	}
 }
 
