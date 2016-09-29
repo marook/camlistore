@@ -208,33 +208,7 @@ func builbBlobAccessHeapFromBlobAccessMap(blobAccessMap *map[blob.Ref]*BlobAcces
 		i += 1
 	}
 	heap.Init(&blobAccessHeap)
-	/* TODO heap n := len(blobAccessHeap)
-	// TODO use container/heap instead of this copy&paste stuff to init the heap
-	for i := n/2 - 1; i >= 0; i-- {
-		down(blobAccessHeap, i, n)
-	}*/
 	return blobAccessHeap
-}
-
-func down(h BlobAccessHeap, i, n int) {
-	// TODO use container/heap instead of this copy&paste stuff to init the heap
-	for {
-		j1 := 2*i + 1
-		if j1 >= n || j1 < 0 { // j1 < 0 after int overflow
-			break
-		}
-		j := j1 // left child
-		if j2 := j1 + 1; j2 < n && h[j1].access >= h[j2].access {
-			j = j2 // = 2*i + 2  // right child
-		}
-		if h[j].access >= h[i].access {
-			break
-		}
-		h[i], h[j] = h[j], h[i]
-		h[i].heapIndex = i
-		h[j].heapIndex = j
-		i = j
-	}
 }
 
 func rebuildKvFromCache(kv sorted.KeyValue, cache blobserver.Storage) (err error){
@@ -279,7 +253,7 @@ func (sto *sto) touchBlob(sb blob.SizedRef) {
         blobAccess, exists := sto.blobAccessMap[sb.Ref]
         if exists {
         	blobAccess.access = now
-		down(sto.blobAccessHeap, blobAccess.heapIndex, len(sto.blobAccessHeap))
+		heap.Fix(&sto.blobAccessHeap, blobAccess.heapIndex)
         } else {
 		sto.cacheBytes += int64(sb.Size)
                 
