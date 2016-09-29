@@ -174,7 +174,8 @@ func buildBlobAccessMapFromKv(kv sorted.KeyValue) (blobAccessMap map[blob.Ref]*B
 	kvIt := kv.Find("", "")
 	for kvIt.Next() {
 		val := kvIt.Value()
-		var blobSize, entryAccessTimestamp int
+		var blobSize uint32
+		var entryAccessTimestamp int64
 		nTokens, err := fmt.Sscanf(val, "%d:%d", &blobSize, &entryAccessTimestamp)
 		if err != nil {
 			return nil, err
@@ -186,7 +187,7 @@ func buildBlobAccessMapFromKv(kv sorted.KeyValue) (blobAccessMap map[blob.Ref]*B
 		if !ok {
 			return nil, errors.New(fmt.Sprintf("Failed to parse blob ref '%s'", kvIt.Key()))
 		}
-		blobAccessMap[ref] = &BlobAccess{ref: ref, blobSize: uint32(blobSize), access: int64(entryAccessTimestamp)}
+		blobAccessMap[ref] = &BlobAccess{ref: ref, blobSize: blobSize, access: entryAccessTimestamp}
 	}
 	return blobAccessMap, nil
 }
@@ -262,7 +263,6 @@ func (sto *sto) touchBlob(sb blob.SizedRef) {
                 sto.blobAccessHeap = append(sto.blobAccessHeap, &blobAccess)
 	}
 
-	// TODO can we really use %d for int64?
         val := fmt.Sprintf("%d:%d", sb.Size, now)
         sto.kv.Set(sb.Ref.String(), val)
 
@@ -358,6 +358,3 @@ func (sto *sto) RemoveFromCacheMetadata(blobs []blob.Ref) {
 func (sto *sto) EnumerateBlobs(ctx context.Context, dest chan<- blob.SizedRef, after string, limit int) error {
 	return sto.origin.EnumerateBlobs(ctx, dest, after, limit)
 }
-
-// TODO:
-//var _ blobserver.Generationer = (*sto)(nil)
