@@ -223,7 +223,7 @@ func rebuildKvFromCache(kv sorted.KeyValue, cache blobserver.Storage) (err error
 
 	setBatch := kv.BeginBatch()
 	ch := make(chan blob.SizedRef)
-	errCh := make(chan error) // TODO check if there was an error
+	errCh := make(chan error)
 
 	go func() {
 		errCh <- cache.EnumerateBlobs(context.TODO(), ch, "", -1)
@@ -270,16 +270,18 @@ func (sto *sto) touchBlob(sb blob.SizedRef) {
 }
 
 func (sto *sto) EnforceCacheLimits() {
+	deletedRefs := []blob.Ref{}
 	for sto.cacheBytes > sto.maxCacheBytes {
 		droppedBlobAccess := heap.Pop(&sto.blobAccessHeap).(*BlobAccess)
+		delete(sto.blobAccessMap, droppedBlobAccess.ref)
+		
 		sto.cacheBytes -= int64(droppedBlobAccess.blobSize)
 		
-		log.Printf(">>>>>> would drop %v (ac: %d, size: %d, mx: %d > %d)", droppedBlobAccess.ref, int(droppedBlobAccess.access), droppedBlobAccess.blobSize, int(sto.cacheBytes), int(sto.maxCacheBytes))
+		log.Printf(">>>>>> dropping %v (ac: %d, size: %d, mx: %d > %d)", droppedBlobAccess.ref, int(droppedBlobAccess.access), droppedBlobAccess.blobSize, int(sto.cacheBytes), int(sto.maxCacheBytes))
 
-		// TODO collect refs then only drop once
-		sto.cache.RemoveBlobs([]blob.Ref{droppedBlobAccess.ref})
-		// TODO also drop entry from sto.blobAccessMap
+		deletedRefs = append(deletedRefs, droppedBlobAccess.ref)
 	}
+	sto.cache.RemoveBlobs(deletedRefs)
 }
 
 func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
