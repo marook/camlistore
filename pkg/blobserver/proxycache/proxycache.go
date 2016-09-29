@@ -141,7 +141,7 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 	}
 	blobAccessMap, err := buildBlobAccessMapFromKv(kv)
 	if err != nil {
-		log.Printf("Error in proxycache kv => rebuilding it: %v", err)
+		log.Printf("Error in proxycache metadata => rebuilding it: %v", err)
 		err := rebuildKvFromCache(kv, cacheSto)
 		if err != nil {
 			return nil, err
@@ -213,7 +213,7 @@ func builbBlobAccessHeapFromBlobAccessMap(blobAccessMap *map[blob.Ref]*BlobAcces
 }
 
 func rebuildKvFromCache(kv sorted.KeyValue, cache blobserver.Storage) (err error){
-	log.Printf("Rebuilding proxycache...")
+	log.Printf("Rebuilding proxycache metadata...")
 	
 	delBatch := kv.BeginBatch()
 	kvIt := kv.Find("", "")
