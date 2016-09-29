@@ -22,12 +22,22 @@ blobserver.
 The proxycache blobserver type also takes a sorted.KeyValue reference
 which it uses as the LRU for which old items to evict from the cache.
 
+Be aware that maxCacheBytes is only the upper limit for the blob's
+content. The cache blob storage might actually grow bigger because of
+some storage overhead.
+
 Example config:
 
       "/cache/": {
           "handler": "storage-proxycache",
           "handlerArgs": {
-... TODO
+		"origin": "/bs-remote-origin/",
+		"cache": "/bs-local-cache/",
+		"meta": {
+		    "file": "/home/myUser/var/camlistore/proxycache.leveldb",
+		    "type": "leveldb"
+		},
+		"maxCacheBytes": 25165824
           }
       },
 */
