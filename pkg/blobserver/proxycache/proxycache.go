@@ -333,10 +333,26 @@ func (sto *sto) ReceiveBlob(br blob.Ref, src io.Reader) (sb blob.SizedRef, err e
 }
 
 func (sto *sto) RemoveBlobs(blobs []blob.Ref) error {
+	sto.RemoveFromCacheMetadata(blobs)
 	// Ignore result of cache removal
 	go sto.cache.RemoveBlobs(blobs)
 	return sto.origin.RemoveBlobs(blobs)
-	// TODO remove blob from sto.blobAccess*
+}
+
+func (sto *sto) RemoveFromCacheMetadata(blobs []blob.Ref) {
+	sto.mu.Lock()
+	defer sto.mu.Unlock()
+	kvBatch := sto.kv.BeginBatch()
+	for _, ref := range blobs {
+		kvBatch.Delete(ref.String())
+		
+		blobAccess, ok := sto.blobAccessMap[ref]
+		if ok {
+			delete(sto.blobAccessMap, blobAccess.ref)
+			heap.Remove(&sto.blobAccessHeap, blobAccess.heapIndex)
+		}
+	}
+	sto.kv.CommitBatch(kvBatch)
 }
 
 func (sto *sto) EnumerateBlobs(ctx context.Context, dest chan<- blob.SizedRef, after string, limit int) error {
