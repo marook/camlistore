@@ -40,6 +40,25 @@ Example config:
 		"maxCacheBytes": 25165824
           }
       },
+
+In case you are never ever removing blobs from origin you can enable
+basic temporary offline support from origin. You have to add the
+property "I_AGREE" just like in the following config example:
+
+      "/cache/": {
+          "handler": "storage-proxycache",
+          "handlerArgs": {
+		"origin": "/bs-remote-origin/",
+		"cache": "/bs-local-cache/",
+                "I_AGREE": "that blobs are never removed from origin",
+		"meta": {
+		    "file": "/home/myUser/var/camlistore/proxycache.leveldb",
+		    "type": "leveldb"
+		},
+		"maxCacheBytes": 25165824
+          }
+      },
+
 */
 package proxycache // import "camlistore.org/pkg/blobserver/proxycache"
 
@@ -63,10 +82,11 @@ import (
 )
 
 type BlobAccess struct {
-	ref       blob.Ref
-	blobSize  uint32
-	access    int64 // unix timestamp of the last access
-	heapIndex int // index of the BlobAccess in the heap. used to speed up finding it
+	ref           blob.Ref
+	blobSize      uint32
+	access        int64 // unix timestamp of the last access
+	contentCached bool
+	heapIndex     int // index of the BlobAccess in the heap. used to speed up finding it
 }
 
 type BlobAccessHeap []*BlobAccess
@@ -99,6 +119,7 @@ type sto struct {
 	cache         blobserver.Storage
 	kv            sorted.KeyValue
 	maxCacheBytes int64
+	offlineSupport   bool
 
 	mu             sync.Mutex // guards cacheBytes, kv and blobAccess* mutations
 	cacheBytes     int64
@@ -116,6 +137,7 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 		cache         = config.RequiredString("cache")
 		kvConf        = config.RequiredObject("meta")
 		maxCacheBytes = config.OptionalInt64("maxCacheBytes", 512<<20)
+		agreement     = config.OptionalString("I_AGREE", "")
 	)
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -164,6 +186,7 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 		kv:             kv,
 		blobAccessHeap: blobAccessHeap,
 		blobAccessMap:  blobAccessMap,
+		offlineSupport: agreement == "that blobs are never removed from origin",
 	}
 	s.EnforceCacheLimits()
 	return s, nil
@@ -176,18 +199,24 @@ func buildBlobAccessMapFromKv(kv sorted.KeyValue) (blobAccessMap map[blob.Ref]*B
 		val := kvIt.Value()
 		var blobSize uint32
 		var entryAccessTimestamp int64
-		nTokens, err := fmt.Sscanf(val, "%d:%d", &blobSize, &entryAccessTimestamp)
+		var contentCachedStr string
+		nTokens, err := fmt.Sscanf(val, "%x:%x:%s", &blobSize, &entryAccessTimestamp, &contentCachedStr)
 		if err != nil {
 			return nil, err
 		}
-		if nTokens != 2 {
+		if nTokens != 3 {
 			return nil, errors.New(fmt.Sprintf("Can't parse kv entry '%s'", val))
 		}
 		ref, ok := blob.Parse(kvIt.Key())
 		if !ok {
 			return nil, errors.New(fmt.Sprintf("Failed to parse blob ref '%s'", kvIt.Key()))
 		}
-		blobAccessMap[ref] = &BlobAccess{ref: ref, blobSize: blobSize, access: entryAccessTimestamp}
+		blobAccessMap[ref] = &BlobAccess{
+			ref: ref,
+			blobSize: blobSize,
+			access: entryAccessTimestamp,
+			contentCached: contentCachedStr == "1",
+		}
 	}
 	return blobAccessMap, nil
 }
@@ -225,17 +254,15 @@ func rebuildKvFromCache(kv sorted.KeyValue, cache blobserver.Storage) (err error
 	setBatch := kv.BeginBatch()
 	ch := make(chan blob.SizedRef)
 	errCh := make(chan error)
-
 	go func() {
 		errCh <- cache.EnumerateBlobs(context.TODO(), ch, "", -1)
 	}()
-
 	for {
 		sr, ok := <-ch
 		if !ok {
 			break
 		}
-		val := fmt.Sprintf("%d:0", sr.Size)
+		val := fmt.Sprintf("%x:%x:1", sr.Size, 0)
 		kv.Set(sr.Ref.String(), val)
 	}
 	err = <-errCh
@@ -243,29 +270,49 @@ func rebuildKvFromCache(kv sorted.KeyValue, cache blobserver.Storage) (err error
 		return err
 	}
 	kv.CommitBatch(setBatch)
+
 	return nil
 }
 
-func (sto *sto) touchBlob(sb blob.SizedRef) {
+func (sto *sto) touchBlob(sb blob.SizedRef, contentCached bool) {
 	sto.mu.Lock()
 	defer sto.mu.Unlock()
+	sto.touchBlobs([]blob.SizedRef{sb}, contentCached)
+}
 
+func (sto *sto) touchBlobs(blobs []blob.SizedRef, contentCached bool) {
 	now := time.Now().Unix()
-        blobAccess, exists := sto.blobAccessMap[sb.Ref]
-        if exists {
-        	blobAccess.access = now
-		heap.Fix(&sto.blobAccessHeap, blobAccess.heapIndex)
-        } else {
-		sto.cacheBytes += int64(sb.Size)
-                
-                blobAccess := BlobAccess{ref: sb.Ref, blobSize: sb.Size, access: now, heapIndex: len(sto.blobAccessHeap)}
-                sto.blobAccessMap[sb.Ref] = &blobAccess
-                sto.blobAccessHeap = append(sto.blobAccessHeap, &blobAccess)
+	kvBatch := sto.kv.BeginBatch()
+	for _, sb := range blobs {
+		blobAccess, exists := sto.blobAccessMap[sb.Ref]
+		if exists {
+			blobAccess.access = now
+			blobAccess.contentCached = blobAccess.contentCached || contentCached
+			heap.Fix(&sto.blobAccessHeap, blobAccess.heapIndex)
+		} else {
+			sto.cacheBytes += int64(sb.Size)
+			
+			blobAccess := BlobAccess{
+				ref: sb.Ref,
+				blobSize: sb.Size,
+				access: now,
+				contentCached: contentCached,
+				heapIndex: len(sto.blobAccessHeap),
+			}
+			sto.blobAccessMap[sb.Ref] = &blobAccess
+			sto.blobAccessHeap = append(sto.blobAccessHeap, &blobAccess)
+		}
+
+		var contentCachedStr string
+		if contentCached {
+			contentCachedStr = "1"
+		} else {
+			contentCachedStr = "0"
+		}
+		val := fmt.Sprintf("%x:%x:%s", sb.Size, now, contentCachedStr)
+		kvBatch.Set(sb.Ref.String(), val)
 	}
-
-        val := fmt.Sprintf("%d:%d", sb.Size, now)
-        sto.kv.Set(sb.Ref.String(), val)
-
+	sto.kv.CommitBatch(kvBatch)
 	sto.EnforceCacheLimits()
 }
 
@@ -277,12 +324,11 @@ func (sto *sto) EnforceCacheLimits() {
 			droppedBlobAccess := heap.Pop(&sto.blobAccessHeap).(*BlobAccess)
 			delete(sto.blobAccessMap, droppedBlobAccess.ref)
 			kvBatch.Delete(droppedBlobAccess.ref.String())
-			
-			sto.cacheBytes -= int64(droppedBlobAccess.blobSize)
-			
-			log.Printf(">>>>>> dropping %v (ac: %d, size: %d, mx: %d > %d)", droppedBlobAccess.ref, int(droppedBlobAccess.access), droppedBlobAccess.blobSize, int(sto.cacheBytes), int(sto.maxCacheBytes))
-
-			deletedRefs = append(deletedRefs, droppedBlobAccess.ref)
+			if droppedBlobAccess.contentCached {
+				sto.cacheBytes -= int64(droppedBlobAccess.blobSize)
+				log.Printf(">>>>>> dropping %v (ac: %d, size: %d, mx: %d > %d)", droppedBlobAccess.ref, int(droppedBlobAccess.access), droppedBlobAccess.blobSize, int(sto.cacheBytes), int(sto.maxCacheBytes))
+				deletedRefs = append(deletedRefs, droppedBlobAccess.ref)
+			}
 		}
 		sto.cache.RemoveBlobs(deletedRefs)
 		sto.kv.CommitBatch(kvBatch)
@@ -292,8 +338,8 @@ func (sto *sto) EnforceCacheLimits() {
 func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 	rc, size, err = sto.cache.Fetch(b)
 	if err == nil {
-		sto.touchBlob(blob.SizedRef{Ref: b, Size: size})
-		log.Printf(">>>>>> fetch from cache %v", b)
+		sto.touchBlob(blob.SizedRef{Ref: b, Size: size}, true)
+		log.Printf(">>>>>> cache fetch %v", b)
 		return
 	}
 	if err != os.ErrNotExist {
@@ -312,20 +358,58 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 			log.Printf("populating proxycache cache for %v: %v", b, err)
 			return
 		}
-		sto.touchBlob(blob.SizedRef{Ref: b, Size: size})
-		log.Printf(">>>>>> fetch from origin %v", b)
+		sto.touchBlob(blob.SizedRef{Ref: b, Size: size}, true)
+		log.Printf(">>>>>> origin fetch %v", b)
 	}()
 	return ioutil.NopCloser(bytes.NewReader(all)), size, nil
 }
 
 func (sto *sto) StatBlobs(dest chan<- blob.SizedRef, blobs []blob.Ref) error {
-	// TODO: stat from cache if possible? then at least we have
-	// to be sure we never have blobs in the cache that we don't have
-	// in the origin. For now, be paranoid and just proxy to the origin:
-	for _, ref := range blobs {
-		log.Printf(">>>>>> stat %v", ref)
+	if(sto.offlineSupport){
+		sto.mu.Lock()
+		defer sto.mu.Unlock()
+
+		notCachedRefs := []blob.Ref{}
+		for _, ref := range blobs {
+			blobAccess, ok := sto.blobAccessMap[ref]
+			if ok {
+				dest <- blob.SizedRef{Ref: ref, Size: blobAccess.blobSize}
+				log.Printf(">>>>>> cache stat %v", ref)
+			} else {
+				notCachedRefs = append(notCachedRefs, ref)
+			}
+		}
+
+		originStats := []blob.SizedRef{}
+		if(len(notCachedRefs) > 0){
+			originStatsCh := make(chan blob.SizedRef)
+			errCh := make(chan error)
+			sto.mu.Unlock()
+			go func() {
+				errCh <- sto.origin.StatBlobs(originStatsCh, notCachedRefs)
+			}()
+			for {
+				originRef, ok := <-originStatsCh
+				if !ok {
+					break
+				}
+				originStats = append(originStats, originRef)
+				dest <- originRef
+				log.Printf(">>>>>> origin stat %v", originRef.Ref)
+			}
+			sto.mu.Lock()
+			err := <-errCh
+			if err != nil {
+				return err
+			}
+		}
+
+		sto.touchBlobs(originStats, false)
+
+		return nil
+	} else {
+		return sto.origin.StatBlobs(dest, blobs)
 	}
-	return sto.origin.StatBlobs(dest, blobs)
 }
 
 func (sto *sto) ReceiveBlob(br blob.Ref, src io.Reader) (sb blob.SizedRef, err error) {
@@ -338,7 +422,7 @@ func (sto *sto) ReceiveBlob(br blob.Ref, src io.Reader) (sb blob.SizedRef, err e
 	if _, err = sto.cache.ReceiveBlob(br, bytes.NewReader(buf.Bytes())); err != nil {
 		return
 	}
-	sto.touchBlob(sb)
+	sto.touchBlob(sb, true)
 	return sto.origin.ReceiveBlob(br, bytes.NewReader(buf.Bytes()))
 }
 
