@@ -289,7 +289,10 @@ func (sto *sto) touchBlobs(blobs []blob.SizedRef, contentCached bool) {
 		blobAccess, exists := sto.blobAccessMap[sb.Ref]
 		if exists {
 			blobAccess.access = now
-			blobAccess.contentCached = blobAccess.contentCached || contentCached
+			if !blobAccess.contentCached && contentCached {
+				blobAccess.contentCached = true
+				sto.cacheBytes += int64(sb.Size)
+			}
 			heap.Fix(&sto.blobAccessHeap, blobAccess.heapIndex)
 		} else {
 			sto.cacheBytes += int64(sb.Size)
@@ -446,6 +449,9 @@ func (sto *sto) RemoveFromCacheMetadata(blobs []blob.Ref) {
 		if ok {
 			delete(sto.blobAccessMap, blobAccess.ref)
 			heap.Remove(&sto.blobAccessHeap, blobAccess.heapIndex)
+			if blobAccess.contentCached {
+				sto.cacheBytes -= int64(blobAccess.blobSize)
+			}
 		}
 	}
 	sto.kv.CommitBatch(kvBatch)
