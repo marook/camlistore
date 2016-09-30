@@ -59,6 +59,10 @@ property "I_AGREE" just like in the following config example:
           }
       },
 
+Even if you enabled temporary offline support you still have to make
+sure that you writes are somewhen synced to origin. proxycache will not
+do this for you.
+
 */
 package proxycache // import "camlistore.org/pkg/blobserver/proxycache"
 
@@ -101,8 +105,6 @@ func (h BlobAccessHeap) Swap(i, j int) {
 }
 
 func (h *BlobAccessHeap) Push(x interface{}) {
-	// Push and Pop use pointer receivers because they modify the slice's length,
-	// not just its contents.
 	*h = append(*h, x.(*BlobAccess))
 }
 
