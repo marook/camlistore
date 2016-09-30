@@ -428,10 +428,14 @@ func (sto *sto) ReceiveBlob(br blob.Ref, src io.Reader) (sb blob.SizedRef, err e
 		return
 	}
 	sto.touchBlob(sb, true)
+	// TODO for full offline support we need to be independent of origin
 	return sto.origin.ReceiveBlob(br, bytes.NewReader(buf.Bytes()))
 }
 
 func (sto *sto) RemoveBlobs(blobs []blob.Ref) error {
+	if(sto.offlineSupport){
+		panic("proxycache in offline mode does not support removing blobs")
+	}
 	sto.RemoveFromCacheMetadata(blobs)
 	// Ignore result of cache removal
 	go sto.cache.RemoveBlobs(blobs)
@@ -458,5 +462,6 @@ func (sto *sto) RemoveFromCacheMetadata(blobs []blob.Ref) {
 }
 
 func (sto *sto) EnumerateBlobs(ctx context.Context, dest chan<- blob.SizedRef, after string, limit int) error {
+	// TODO we should fallback to enumerating proxycache if origin fails and we're in offlineMode
 	return sto.origin.EnumerateBlobs(ctx, dest, after, limit)
 }
