@@ -30,6 +30,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
@@ -78,7 +79,11 @@ var (
 	// Our temporary source tree root and build dir, i.e: buildGoPath + "src/camlistore.org"
 	buildSrcDir string
 	// files mirrored from camRoot to buildSrcDir
-	rxMirrored = regexp.MustCompile(`^([a-zA-Z0-9\-\_]+\.(?:blobs|camli|css|eot|err|gif|go|s|pb\.go|gpg|html|ico|jpg|js|json|xml|min\.css|min\.js|mp3|otf|png|svg|pdf|psd|tiff|ttf|woff|xcf|tar\.gz|gz|tar\.xz|tbz2|zip))$`)
+	rxMirrored = regexp.MustCompile(`^([a-zA-Z0-9\-\_]+\.(?:blobs|camli|css|eot|err|gif|go|s|pb\.go|gpg|html|ico|jpg|js|json|xml|min\.css|min\.js|mp3|otf|png|svg|pdf|psd|tiff|ttf|woff|xcf|tar\.gz|gz|tar\.xz|tbz2|zip|sh))$`)
+	// base file exceptions for the above matching, so as not to complicate the regexp any further
+	mirrorIgnored = map[string]bool{
+		"publisher.js": true, // because this file is (re)generated after the mirroring
+	}
 )
 
 func main() {
@@ -177,6 +182,15 @@ func main() {
 	}
 
 	withCamlistored := stringListContains(targs, "camlistore.org/server/camlistored")
+
+	if withCamlistored {
+		// gopherjs has to run before doEmbed since we need all the javascript
+		// to be generated before embedding happens.
+		if err := makeGopherjs(); err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	if *embedResources && withCamlistored {
 		doEmbed()
 	}
@@ -271,6 +285,255 @@ func baseDirName(sql bool) string {
 		buildBaseDir += "-armv" + *buildARM
 	}
 	return buildBaseDir
+}
+
+const (
+	publisherJS = "app/publisher/publisher.js"
+)
+
+// buildGopherjs builds the gopherjs binary from our vendored gopherjs source.
+// It returns the path to the binary if successful, an error otherwise.
+func buildGopherjs() (string, error) {
+	src := filepath.Join(buildSrcDir, filepath.FromSlash("vendor/github.com/gopherjs/gopherjs"))
+	// Note: do not use exeName for gopherjs, as it will run on the current platform,
+	// not on the one we're cross-compiling for.
+	bin := filepath.Join(buildGoPath, "bin", "gopherjs")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	var srcModtime, binModtime time.Time
+	if err := filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		if t := fi.ModTime(); t.After(srcModtime) {
+			srcModtime = t
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	fi, err := os.Stat(bin)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		binModtime = srcModtime
+	} else {
+		binModtime = fi.ModTime()
+	}
+	if binModtime.After(srcModtime) {
+		return bin, nil
+	}
+	log.Printf("Now rebuilding gopherjs at %v", bin)
+	cmd := exec.Command("go", "install")
+	cmd.Dir = src
+	cmd.Env = append(cleanGoEnv(),
+		"GOPATH="+buildGoPath,
+	)
+	// forcing GOOS and GOARCH to prevent cross-compiling, as gopherjs will run on the
+	// current (host) platform.
+	cmd.Env = setEnv(cmd.Env, "GOOS", runtime.GOOS)
+	cmd.Env = setEnv(cmd.Env, "GOARCH", runtime.GOARCH)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("error while building gopherjs: %v, %v", err, string(out))
+	}
+	return bin, nil
+}
+
+// For some reason (https://github.com/gopherjs/gopherjs/issues/415), the
+// github.com/gopherjs/gopherjs/js import is treated specially, and it cannot be
+// vendored at all for gopherjs to work properly. So we move it to our tmp GOPATH.
+func moveGopherjs() error {
+	dest := filepath.Join(buildGoPath, filepath.FromSlash("src/github.com/gopherjs/gopherjs"))
+	if err := os.MkdirAll(dest, 0700); err != nil {
+		return err
+	}
+	src := filepath.Join(buildSrcDir, filepath.FromSlash("vendor/github.com/gopherjs/gopherjs"))
+	if err := filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		suffix, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		destName := filepath.Join(dest, suffix)
+		if fi.IsDir() {
+			return os.MkdirAll(destName, 0700)
+		}
+		destFi, err := os.Stat(destName)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && !fi.ModTime().After(destFi.ModTime()) {
+			return nil
+		}
+		dataSrc, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return ioutil.WriteFile(destName, dataSrc, 0600)
+	}); err != nil {
+		return err
+	}
+	return os.RemoveAll(src)
+}
+
+// genSearchTypes duplicates some of the camlistore.org/pkg/search types into
+// camlistore.org/app/publisher/js/zsearch.go , because it's too costly (in output
+// file size) for now to import the search pkg into gopherjs.
+func genSearchTypes() error {
+	sourceFile := filepath.Join(buildSrcDir, filepath.FromSlash("pkg/search/describe.go"))
+	outputFile := filepath.Join(buildSrcDir, filepath.FromSlash("app/publisher/js/zsearch.go"))
+	fi1, err := os.Stat(sourceFile)
+	if err != nil {
+		return err
+	}
+	fi2, err := os.Stat(outputFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil && fi2.ModTime().After(fi1.ModTime()) {
+		wantDestFile[outputFile] = true
+		return nil
+	}
+	args := []string{"generate", "camlistore.org/app/publisher/js"}
+	cmd := exec.Command("go", args...)
+	cmd.Env = append(cleanGoEnv(),
+		"GOPATH="+buildGoPath,
+	)
+	cmd.Env = setEnv(cmd.Env, "GOOS", runtime.GOOS)
+	cmd.Env = setEnv(cmd.Env, "GOARCH", runtime.GOARCH)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go generate for publisher js error: %v, %v", err, string(out))
+	}
+	wantDestFile[outputFile] = true
+	log.Printf("generated %v", outputFile)
+	return nil
+}
+
+// genPublisherJS runs the gopherjs command, using the gopherjsBin binary, on
+// camlistore.org/app/publisher/js, to generate the javascript code at
+// app/publisher/publisher.js
+func genPublisherJS(gopherjsBin string) error {
+	if err := genSearchTypes(); err != nil {
+		return err
+	}
+	// Run gopherjs on a temporary output file, so we don't change the
+	// modtime of the existing gopherjs.js if there was no reason to.
+	output := filepath.Join(buildSrcDir, filepath.FromSlash(publisherJS))
+	tmpOutput := output + ".new"
+	// TODO(mpl): maybe not with -m when building for devcam.
+	args := []string{"build", "--tags", "nocgo", "-m", "-o", tmpOutput, "camlistore.org/app/publisher/js"}
+	cmd := exec.Command(gopherjsBin, args...)
+	cmd.Env = append(cleanGoEnv(),
+		"GOPATH="+buildGoPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gopherjs for publisher error: %v, %v", err, string(out))
+	}
+
+	// check if new output is different from previous run result
+	_, err := os.Stat(output)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	needsUpdate := true
+	if err == nil {
+		if hashsum(tmpOutput) == hashsum(output) {
+			needsUpdate = false
+		}
+	}
+	if needsUpdate {
+		// general case: replace previous run result with new output
+		if err := os.Rename(tmpOutput, output); err != nil {
+			return err
+		}
+		log.Printf("gopherjs generated %v", output)
+	}
+	// And since we're generating after the mirroring, we need to manually
+	// add the output to the wanted files
+	wantDestFile[output] = true
+	wantDestFile[output+".map"] = true
+
+	// Finally, even when embedding resources, we copy the output back to
+	// camRoot. It's a bit unsatisfactory that we have to modify things out of
+	// buildGoPath but it's better than the alternative (the user ending up
+	// without a copy of publisher.js in their camRoot).
+	jsInCamRoot := filepath.Join(camRoot, filepath.FromSlash(publisherJS))
+	if !needsUpdate {
+		_, err := os.Stat(jsInCamRoot)
+		if err == nil {
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
+	}
+	data, err := ioutil.ReadFile(output)
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(
+		jsInCamRoot,
+		data, 0600); err != nil {
+		return err
+	}
+	log.Printf("Copied gopherjs generated code to  %v", jsInCamRoot)
+	return nil
+}
+
+// noGopherJS creates a fake (unusable) gopherjs.js file for when we want to skip all of
+// the gopherjs business.
+func noGopherJS(output string) {
+	if err := ioutil.WriteFile(
+		output,
+		[]byte("// This (broken) output should only be generated when CAMLI_MAKE_USEGOPATH is set, which should be only for integration tests.\n"),
+		0600); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func hashsum(filename string) string {
+	h := sha256.New()
+	f, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("could not compute SHA256 of %v: %v", filename, err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(h, f); err != nil {
+		log.Fatalf("could not compute SHA256 of %v: %v", filename, err)
+	}
+	return string(h.Sum(nil))
+}
+
+// makeGopherjs builds and runs the gopherjs command on camlistore.org/app/publisher/js
+// When CAMLI_MAKE_USEGOPATH is set (for integration tests through devcam), we
+// generate a fake file instead.
+func makeGopherjs() error {
+	if useGoPath {
+		noGopherJS(filepath.Join(buildSrcDir, filepath.FromSlash(publisherJS)))
+		return nil
+	}
+	gopherjs, err := buildGopherjs()
+	if err != nil {
+		return fmt.Errorf("error building gopherjs: %v", err)
+	}
+
+	// TODO(mpl): remove when https://github.com/gopherjs/gopherjs/issues/415 is fixed.
+	if err := moveGopherjs(); err != nil {
+		return err
+	}
+
+	if err := genPublisherJS(gopherjs); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // create the tmp GOPATH, and mirror to it from camRoot.
@@ -553,7 +816,7 @@ func verifyCamlistoreRoot(dir string) {
 }
 
 func verifyGoVersion() {
-	const neededMinor = '6'
+	const neededMinor = '7'
 	_, err := exec.LookPath("go")
 	if err != nil {
 		log.Fatalf("Go doesn't appear to be installed ('go' isn't in your PATH). Install Go 1.%c or newer.", neededMinor)
@@ -601,6 +864,9 @@ func walkDir(src string, opts walkOpts) (maxMod time.Time, err error) {
 		dir, _ := filepath.Split(path)
 		parent := filepath.Base(dir)
 		if (strings.HasPrefix(base, ".#") || !rxMirrored.MatchString(base)) && parent != "testdata" {
+			return nil
+		}
+		if _, ok := mirrorIgnored[base]; ok {
 			return nil
 		}
 		suffix, err := filepath.Rel(src, path)

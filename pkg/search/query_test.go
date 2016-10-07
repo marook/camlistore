@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/index"
 	"camlistore.org/pkg/index/indextest"
+	"camlistore.org/pkg/osutil"
 	. "camlistore.org/pkg/search"
 	"camlistore.org/pkg/test"
 	"go4.org/types"
@@ -51,9 +54,10 @@ func (i indexType) String() string {
 }
 
 type queryTest struct {
-	t     testing.TB
-	id    *indextest.IndexDeps
-	itype indexType
+	t               testing.TB
+	id              *indextest.IndexDeps
+	itype           indexType
+	candidateSource string
 
 	handlerOnce sync.Once
 	newHandler  func() *Handler
@@ -116,6 +120,13 @@ func testQueryType(t testing.TB, fn func(*queryTest), itype indexType) {
 func (qt *queryTest) wantRes(req *SearchQuery, wanted ...blob.Ref) {
 	if qt.itype == indexClassic {
 		req.Sort = Unsorted
+	}
+	if qt.candidateSource != "" {
+		ExportSetCandidateSourceHook(func(pickedCandidate string) {
+			if pickedCandidate != qt.candidateSource {
+				qt.t.Fatalf("unexpected candidateSource: got %v, want %v", pickedCandidate, qt.candidateSource)
+			}
+		})
 	}
 	res, err := qt.Handler().Query(req)
 	if err != nil {
@@ -656,6 +667,26 @@ func TestDecodeFileInfo(t *testing.T) {
 			qt.t.Errorf("DescribedBlob.WholeRef: got %v, wanted %v", wholeRef, db.File.WholeRef)
 			return
 		}
+	})
+}
+
+func TestQueryFileCandidateSource(t *testing.T) {
+	testQueryTypes(t, memIndexTypes, func(qt *queryTest) {
+		id := qt.id
+		fileRef, _ := id.UploadFile("some-stuff.txt", "hello", time.Unix(123, 0))
+		qt.t.Logf("fileRef = %q", fileRef)
+		p1 := id.NewPlannedPermanode("1")
+		id.SetAttribute(p1, "camliContent", fileRef.String())
+
+		sq := &SearchQuery{
+			Constraint: &Constraint{
+				File: &FileConstraint{
+					WholeRef: blob.SHA1FromString("hello"),
+				},
+			},
+		}
+		qt.candidateSource = "corpus_file_meta"
+		qt.wantRes(sq, fileRef)
 	})
 }
 
@@ -1433,6 +1464,114 @@ func BenchmarkQueryRecentPermanodes(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			*req.Describe = DescribeRequest{}
+			_, err := h.Query(req)
+			if err != nil {
+				qt.t.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkQueryPermanodes(b *testing.B) {
+	benchmarkQueryPermanodes(b, false)
+}
+
+func BenchmarkQueryDescribePermanodes(b *testing.B) {
+	benchmarkQueryPermanodes(b, true)
+}
+
+func benchmarkQueryPermanodes(b *testing.B, describe bool) {
+	b.ReportAllocs()
+	testQueryTypes(b, corpusTypeOnly, func(qt *queryTest) {
+		id := qt.id
+
+		for i := 0; i < 1000; i++ {
+			pn := id.NewPlannedPermanode(fmt.Sprint(i))
+			id.SetAttribute(pn, "foo", fmt.Sprint(i))
+		}
+
+		req := &SearchQuery{
+			Constraint: &Constraint{
+				Permanode: &PermanodeConstraint{},
+			},
+		}
+		if describe {
+			req.Describe = &DescribeRequest{}
+		}
+
+		h := qt.Handler()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			if describe {
+				*req.Describe = DescribeRequest{}
+			}
+			_, err := h.Query(req)
+			if err != nil {
+				qt.t.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkQueryPermanodeLocation(b *testing.B) {
+	b.ReportAllocs()
+	testQueryTypes(b, corpusTypeOnly, func(qt *queryTest) {
+		id := qt.id
+
+		// Upload a basic image
+		camliRootPath, err := osutil.GoPackagePath("camlistore.org")
+		if err != nil {
+			panic("Package camlistore.org no found in $GOPATH or $GOPATH not defined")
+		}
+		uploadFile := func(file string, modTime time.Time) blob.Ref {
+			fileName := filepath.Join(camliRootPath, "pkg", "search", "testdata", file)
+			contents, err := ioutil.ReadFile(fileName)
+			if err != nil {
+				panic(err)
+			}
+			br, _ := id.UploadFile(file, string(contents), modTime)
+			return br
+		}
+		fileRef := uploadFile("dude-gps.jpg", time.Time{})
+
+		var n int
+		newPn := func() blob.Ref {
+			n++
+			return id.NewPlannedPermanode(fmt.Sprint(n))
+		}
+
+		pn := id.NewPlannedPermanode("photo")
+		id.SetAttribute(pn, "camliContent", fileRef.String())
+
+		for i := 0; i < 5; i++ {
+			pn := newPn()
+			id.SetAttribute(pn, "camliNodeType", "foursquare.com:venue")
+			id.SetAttribute(pn, "latitude", fmt.Sprint(50-i))
+			id.SetAttribute(pn, "longitude", fmt.Sprint(i))
+			for j := 0; j < 5; j++ {
+				qn := newPn()
+				id.SetAttribute(qn, "camliNodeType", "foursquare.com:checkin")
+				id.SetAttribute(qn, "foursquareVenuePermanode", pn.String())
+			}
+		}
+		for i := 0; i < 10; i++ {
+			pn := newPn()
+			id.SetAttribute(pn, "foo", fmt.Sprint(i))
+		}
+
+		req := &SearchQuery{
+			Constraint: &Constraint{
+				Permanode: &PermanodeConstraint{
+					Location: &LocationConstraint{Any: true},
+				},
+			},
+		}
+
+		h := qt.Handler()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
 			_, err := h.Query(req)
 			if err != nil {
 				qt.t.Fatal(err)

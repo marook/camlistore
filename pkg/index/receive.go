@@ -28,6 +28,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +54,7 @@ import (
 // out of order. It panics if started more than once or if the
 // index has no blobSource.
 func (ix *Index) outOfOrderIndexerLoop() {
+	showReindexRace := os.Getenv("CAMLI_SHOW_REINDEX_RACE") != ""
 	ix.mu.RLock()
 	if ix.oooRunning {
 		panic("outOfOrderIndexerLoop is already running")
@@ -64,6 +66,10 @@ func (ix *Index) outOfOrderIndexerLoop() {
 	ix.mu.RUnlock()
 WaitTickle:
 	for range ix.tickleOoo {
+		if showReindexRace {
+			// not strictly needed, but greatly increases the probability of seeing the race.
+			time.Sleep(1 * time.Second)
+		}
 		for {
 			ix.Lock()
 			if len(ix.readyReindex) == 0 {
@@ -402,12 +408,15 @@ func (ix *Index) populateFile(fetcher blob.Fetcher, b *schema.Blob, mm *mutation
 		return err
 	}
 	defer fr.Close()
-	mime, mr := magic.MIMETypeFromReader(fr)
+	mimeType, mr := magic.MIMETypeFromReader(fr)
+	if mimeType == "" {
+		mimeType = magic.MIMETypeByExtension(filepath.Ext(b.FileName()))
+	}
 
 	sha1 := sha1.New()
 	var copyDest io.Writer = sha1
 	var imageBuf *keepFirstN // or nil
-	if strings.HasPrefix(mime, "image/") {
+	if strings.HasPrefix(mimeType, "image/") {
 		imageBuf = &keepFirstN{N: 512 << 10}
 		copyDest = io.MultiWriter(copyDest, imageBuf)
 	}
@@ -467,10 +476,10 @@ func (ix *Index) populateFile(fetcher blob.Fetcher, b *schema.Blob, mm *mutation
 	}
 
 	mm.Set(keyWholeToFileRef.Key(wholeRef, blobRef), "1")
-	mm.Set(keyFileInfo.Key(blobRef), keyFileInfo.Val(size, b.FileName(), mime, wholeRef))
+	mm.Set(keyFileInfo.Key(blobRef), keyFileInfo.Val(size, b.FileName(), mimeType, wholeRef))
 	mm.Set(keyFileTimes.Key(blobRef), keyFileTimes.Val(time3339s))
 
-	if strings.HasPrefix(mime, "audio/") {
+	if strings.HasPrefix(mimeType, "audio/") {
 		indexMusic(io.NewSectionReader(fr, 0, fr.Size()), wholeRef, mm)
 	}
 

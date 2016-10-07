@@ -146,11 +146,14 @@ func newHandlerFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (http.Handl
 	h := NewHandler(indexer, ownerBlobRef)
 	if slurpToMemory {
 		ii := indexer.(*index.Index)
+		ii.Lock()
 		corpus, err := ii.KeepInMemory()
 		if err != nil {
+			ii.Unlock()
 			return nil, fmt.Errorf("error slurping index to memory: %v", err)
 		}
 		h.corpus = corpus
+		ii.Unlock()
 	}
 	return h, nil
 }
@@ -256,11 +259,18 @@ type WithAttrRequest struct {
 	// request.Attr as an attribute are searched.
 	Value string
 	Fuzzy bool // fulltext search (if supported).
+	// At, if non-zero, specifies that the attribute must have been set at
+	// the latest at At.
+	At time.Time
 }
 
 func (r *WithAttrRequest) URLSuffix() string {
-	return fmt.Sprintf("camli/search/permanodeattr?signer=%v&value=%v&fuzzy=%v&attr=%v&max=%v",
+	s := fmt.Sprintf("camli/search/permanodeattr?signer=%v&value=%v&fuzzy=%v&attr=%v&max=%v",
 		r.Signer, url.QueryEscape(r.Value), r.Fuzzy, r.Attr, r.N)
+	if !r.At.IsZero() {
+		s += fmt.Sprintf("&at=%s", types.Time3339(r.At))
+	}
+	return s
 }
 
 // fromHTTP panics with an httputil value on failure
@@ -289,6 +299,9 @@ func (r *WithAttrRequest) fromHTTP(req *http.Request) {
 		r.N = maxR
 	}
 	r.N = r.n()
+	if at := req.FormValue("at"); at != "" {
+		r.At = time.Time(types.ParseTime3339OrZero(at))
+	}
 }
 
 // n returns the sanitized maximum number of search results.
@@ -456,7 +469,7 @@ func (sh *Handler) GetRecentPermanodes(req *RecentRequest) (*RecentResponse, err
 
 	var recent []*RecentItem
 	for res := range ch {
-		dr.Describe(ctx, res.Permanode, 2)
+		dr.StartDescribe(ctx, res.Permanode, 2)
 		recent = append(recent, &RecentItem{
 			BlobRef: res.Permanode,
 			Owner:   res.Signer,
@@ -516,6 +529,7 @@ func (sh *Handler) GetPermanodesWithAttr(req *WithAttrRequest) (*WithAttrRespons
 				Signer:     signer,
 				FuzzyMatch: req.Fuzzy,
 				MaxResults: req.N,
+				At:         req.At,
 			})
 	}()
 
@@ -523,7 +537,7 @@ func (sh *Handler) GetPermanodesWithAttr(req *WithAttrRequest) (*WithAttrRespons
 
 	var withAttr []*WithAttrItem
 	for res := range ch {
-		dr.Describe(ctx, res, 2)
+		dr.StartDescribe(ctx, res, 2)
 		withAttr = append(withAttr, &WithAttrItem{
 			Permanode: res,
 		})
@@ -665,7 +679,7 @@ func (sh *Handler) serveSignerAttrValue(rw http.ResponseWriter, req *http.Reques
 	}
 
 	dr := sh.NewDescribeRequest()
-	dr.Describe(ctx, pn, 2)
+	dr.StartDescribe(ctx, pn, 2)
 	metaMap, err := dr.metaMap()
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
@@ -773,7 +787,7 @@ func (sh *Handler) serveQuery(rw http.ResponseWriter, req *http.Request) {
 	defer httputil.RecoverJSON(rw, req)
 
 	var sq SearchQuery
-	if err := sq.fromHTTP(req); err != nil {
+	if err := sq.FromHTTP(req); err != nil {
 		httputil.ServeJSONError(rw, err)
 		return
 	}
@@ -814,7 +828,7 @@ func (sh *Handler) GetSignerPaths(req *SignerPathsRequest) (*SignerPathsResponse
 
 	dr := sh.NewDescribeRequest()
 	for _, path := range paths {
-		dr.Describe(ctx, path.Base, 2)
+		dr.StartDescribe(ctx, path.Base, 2)
 	}
 	metaMap, err := dr.metaMap()
 	if err != nil {
