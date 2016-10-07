@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,7 @@ import (
 	"camlistore.org/pkg/constants"
 	"camlistore.org/pkg/fileembed"
 	"camlistore.org/pkg/httputil"
+	"camlistore.org/pkg/magic"
 	"camlistore.org/pkg/publish"
 	"camlistore.org/pkg/search"
 	"camlistore.org/pkg/server"
@@ -95,6 +97,95 @@ func appConfig() *config {
 	return conf
 }
 
+// setMasterQuery registers with the app handler a master query that includes
+// topNode and all its descendants as the search response.
+func (ph *publishHandler) setMasterQuery(topNode blob.Ref) error {
+	query := &search.SearchQuery{
+		Sort:  search.CreatedDesc,
+		Limit: -1,
+		Constraint: &search.Constraint{
+			Permanode: &search.PermanodeConstraint{
+				Relation: &search.RelationConstraint{
+					Relation: "parent",
+					Any: &search.Constraint{
+						BlobRefPrefix: topNode.String(),
+					},
+				},
+			},
+		},
+		Describe: &search.DescribeRequest{
+			Depth: 1,
+			Rules: []*search.DescribeRule{
+				{Attrs: []string{"camliContent", "camliContentImage", "camliMember", "camliPath:*"}},
+			},
+		},
+	}
+	data, err := json.Marshal(query)
+	if err != nil {
+		return err
+	}
+	// TODO(mpl): we should use app.Client instead, but a *client.Client
+	// Post method doesn't let us get the body.
+	req, err := http.NewRequest("POST", ph.masterQueryURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	if err := addAuth(req); err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if string(body) != "OK" {
+		return fmt.Errorf("error setting master query on app handler: %v", string(body))
+	}
+	return nil
+}
+
+func (ph *publishHandler) refreshMasterQuery() error {
+	// TODO(mpl): we should use app.Client instead, but a *client.Client
+	// Post method doesn't let us get the body.
+	req, err := http.NewRequest("POST", ph.masterQueryURL+"?refresh=1", nil)
+	if err != nil {
+		return err
+	}
+	if err := addAuth(req); err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// request suppression. let's not consider it an error.
+		return nil
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if string(body) != "OK" {
+		return fmt.Errorf("error refreshing master query: %v", string(body))
+	}
+	return nil
+}
+
+func addAuth(r *http.Request) error {
+	am, err := app.Auth()
+	if err != nil {
+		return err
+	}
+	am.AddAuthHeader(r)
+	return nil
+}
+
 func main() {
 	flag.Parse()
 
@@ -113,8 +204,17 @@ func main() {
 	}
 	conf := appConfig()
 	ph := newPublishHandler(conf)
+	masterQueryURL := os.Getenv("CAMLI_APP_MASTERQUERY_URL")
+	if masterQueryURL == "" {
+		logger.Fatalf("Publisher application needs a CAMLI_APP_MASTERQUERY_URL env var")
+	}
+	ph.masterQueryURL = masterQueryURL
 	if err := ph.initRootNode(); err != nil {
 		logf("%v", err)
+	} else {
+		if err := ph.setMasterQuery(ph.rootNode); err != nil {
+			logf("%v", err)
+		}
 	}
 	ws := webserver.New()
 	ws.Logger = logger
@@ -140,15 +240,14 @@ func newPublishHandler(conf *config) *publishHandler {
 	if maxResizeBytes == 0 {
 		maxResizeBytes = constants.DefaultMaxResizeMem
 	}
-	var CSSFiles []string
+	var CSSFiles, JSDeps []string
 	if conf.SourceRoot != "" {
-		appRoot := filepath.Join(conf.SourceRoot, "app", "publisher")
 		Files = &fileembed.Files{
-			DirFallback: appRoot,
+			DirFallback: conf.SourceRoot,
 		}
 		// TODO(mpl): Can I readdir by listing with "/" on Files, even with DirFallBack?
 		// Apparently not, but retry later.
-		dir, err := os.Open(appRoot)
+		dir, err := os.Open(conf.SourceRoot)
 		if err != nil {
 			logger.Fatal(err)
 		}
@@ -160,8 +259,17 @@ func newPublishHandler(conf *config) *publishHandler {
 		for _, v := range names {
 			if strings.HasSuffix(v, ".css") {
 				CSSFiles = append(CSSFiles, v)
+				continue
+			}
+			// TODO(mpl): document or fix (use a map?) the ordering
+			// problem: i.e. jquery.js must be sourced before
+			// publisher.js. For now, just cheat by sorting the
+			// slice.
+			if strings.HasSuffix(v, ".js") {
+				JSDeps = append(JSDeps, v)
 			}
 		}
+		sort.Strings(JSDeps)
 	} else {
 		Files.Listable = true
 		dir, err := Files.Open("/")
@@ -177,8 +285,13 @@ func newPublishHandler(conf *config) *publishHandler {
 			name := v.Name()
 			if strings.HasSuffix(name, ".css") {
 				CSSFiles = append(CSSFiles, name)
+				continue
+			}
+			if strings.HasSuffix(name, ".js") {
+				JSDeps = append(JSDeps, name)
 			}
 		}
+		sort.Strings(JSDeps)
 	}
 	// TODO(mpl): add all htmls found in Files to the template if none specified?
 	if conf.GoTemplate == "" {
@@ -217,6 +330,7 @@ func newPublishHandler(conf *config) *publishHandler {
 		staticFiles:    Files,
 		goTemplate:     goTemplate,
 		CSSFiles:       CSSFiles,
+		JSDeps:         JSDeps,
 		describedCache: make(map[string]*search.DescribedBlob),
 		cache:          cache,
 		thumbMeta:      thumbMeta,
@@ -251,11 +365,16 @@ type publishHandler struct {
 	rootNodeMu sync.Mutex
 	rootNode   blob.Ref // Root permanode, origin of all camliPaths for this publish handler.
 
+	masterQueryURL  string // not guarded by mutex below, because set on startup.
+	masterQueryMu   sync.Mutex
+	masterQueryDone bool // master query has been registered with the app handler
+
 	cl client // Used for searching, and remote storage.
 
 	staticFiles *fileembed.Files   // For static resources.
 	goTemplate  *template.Template // For publishing/rendering.
 	CSSFiles    []string
+	JSDeps      []string
 	resizeSem   *syncutil.Sem // Limit peak RAM used by concurrent image thumbnail calls.
 
 	describedCacheMu sync.RWMutex
@@ -278,6 +397,16 @@ func (ph *publishHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ph.rootNodeMu.Unlock()
+	ph.masterQueryMu.Lock()
+	if !ph.masterQueryDone {
+		if err := ph.setMasterQuery(ph.rootNode); err != nil {
+			httputil.ServeError(w, r, fmt.Errorf("master query not set: %v", err))
+			ph.masterQueryMu.Unlock()
+			return
+		}
+		ph.masterQueryDone = true
+	}
+	ph.masterQueryMu.Unlock()
 
 	preq, err := ph.NewRequest(w, r)
 	if err != nil {
@@ -405,6 +534,10 @@ func (ph *publishHandler) describe(br blob.Ref) (*search.DescribedBlob, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Could not describe %v: %v", br, err)
 	}
+	// TODO(mpl): check why Describe is not giving us an error when br is invalid.
+	if res == nil || res.Meta == nil || res.Meta[br.String()] == nil {
+		return nil, fmt.Errorf("Could not describe %v", br)
+	}
 	return res.Meta[br.String()], nil
 }
 
@@ -444,12 +577,14 @@ type publishRequest struct {
 	subject              blob.Ref
 	inSubjectChain       map[string]bool // blobref -> true
 	subjectBasePath      string
+	publishedRoot        blob.Ref // on camliRoot, camliPath:somePath = publishedRoot
 }
 
 func (ph *publishHandler) NewRequest(w http.ResponseWriter, r *http.Request) (*publishRequest, error) {
 	// splits a path request into its suffix and subresource parts.
 	// e.g. /blog/foo/camli/res/file/xxx -> ("foo", "file/xxx")
-	suffix, res := strings.TrimPrefix(r.URL.Path, "/"), ""
+	base := app.PathPrefix(r)
+	suffix, res := strings.TrimPrefix(r.URL.Path, base), ""
 	if strings.HasPrefix(suffix, "-/") {
 		suffix, res = "", suffix[2:]
 	} else if s := strings.SplitN(suffix, "/-/", 2); len(s) == 2 {
@@ -461,7 +596,7 @@ func (ph *publishHandler) NewRequest(w http.ResponseWriter, r *http.Request) (*p
 		rw:              w,
 		req:             r,
 		suffix:          suffix,
-		base:            app.PathPrefix(r),
+		base:            base,
 		subres:          res,
 		rootpn:          ph.rootNode,
 		inSubjectChain:  make(map[string]bool),
@@ -498,6 +633,16 @@ func (pr *publishRequest) serveHTTP() {
 
 	switch pr.subresourceType() {
 	case "":
+		// This should not happen too often as now that we have the
+		// javascript code we're not hitting that code path often anymore
+		// in a typical navigation. And the app handler is doing
+		// request suppression anyway.
+		// If needed, we can always do it in a narrower case later.
+		if err := pr.ph.refreshMasterQuery(); err != nil {
+			logf("Error refreshing master query: %v", err)
+			pr.rw.WriteHeader(500)
+			return
+		}
 		pr.serveSubjectTemplate()
 	case "b":
 		// TODO: download a raw blob
@@ -537,6 +682,7 @@ func (pr *publishRequest) findSubject() error {
 	if err != nil {
 		return err
 	}
+	pr.publishedRoot = subject
 	if strings.HasPrefix(pr.subres, "=z/") {
 		// this happens when we are at the root of the published path,
 		// e.g /base/suffix/-/=z/foo.zip
@@ -693,14 +839,19 @@ func (pr *publishRequest) serveFileDownload(des *search.DescribedBlob) {
 		logf("Didn't get file schema from described blob %q", des.BlobRef)
 		return
 	}
-	mime := ""
-	if fileinfo != nil && fileinfo.IsImage() {
-		mime = fileinfo.MIMEType
+	mimeType := ""
+	if fileinfo != nil {
+		if fileinfo.IsImage() || fileinfo.IsText() {
+			mimeType = fileinfo.MIMEType
+			if mimeType == "" {
+				mimeType = magic.MIMETypeByExtension(filepath.Ext(fileinfo.FileName))
+			}
+		}
 	}
 	dh := &server.DownloadHandler{
 		Fetcher:   pr.ph.cl,
 		Cache:     pr.ph.cache,
-		ForceMIME: mime,
+		ForceMIME: mimeType,
 	}
 	dh.ServeHTTP(pr.rw, pr.req, fileref)
 }
@@ -738,14 +889,20 @@ func (pr *publishRequest) fileSchemaRefFromBlob(des *search.DescribedBlob) (file
 // subjectHeader returns the PageHeader corresponding to the described subject.
 func (pr *publishRequest) subjectHeader(described map[string]*search.DescribedBlob) *publish.PageHeader {
 	subdes := described[pr.subject.String()]
+	scheme := "http"
+	if pr.req.TLS != nil {
+		scheme = "https"
+	}
 	header := &publish.PageHeader{
-		Title:    html.EscapeString(getTitle(subdes.BlobRef, described)),
-		CSSFiles: pr.cssFiles(),
-		Meta: func() string {
-			jsonRes, _ := json.MarshalIndent(described, "", "  ")
-			return string(jsonRes)
-		}(),
-		Subject: pr.subject.String(),
+		Title:           html.EscapeString(getTitle(subdes.BlobRef, described)),
+		CSSFiles:        pr.cssFiles(),
+		JSDeps:          pr.jsDeps(),
+		Subject:         pr.subject,
+		Host:            pr.req.Host,
+		Scheme:          scheme,
+		SubjectBasePath: pr.subjectBasePath,
+		PathPrefix:      pr.base,
+		PublishedRoot:   pr.publishedRoot,
 	}
 	return header
 }
@@ -753,6 +910,14 @@ func (pr *publishRequest) subjectHeader(described map[string]*search.DescribedBl
 func (pr *publishRequest) cssFiles() []string {
 	files := []string{}
 	for _, filename := range pr.ph.CSSFiles {
+		files = append(files, pr.staticPath(filename))
+	}
+	return files
+}
+
+func (pr *publishRequest) jsDeps() []string {
+	files := []string{}
+	for _, filename := range pr.ph.JSDeps {
 		files = append(files, pr.staticPath(filename))
 	}
 	return files
