@@ -28,7 +28,7 @@ some storage overhead.
 
 Example config:
 
-      "/cache/": {
+      "/bs/": {
           "handler": "storage-proxycache",
           "handlerArgs": {
 		"origin": "/bs-remote-origin/",
@@ -41,16 +41,20 @@ Example config:
           }
       },
 
-In case you are never ever removing blobs from origin you can enable
-basic temporary offline support from origin. You have to add the
-property "I_AGREE" just like in the following config example:
+There are some further configuration options which make it possible to
+allow a temporary offline origin. Temporary offline support comes with
+the following constraints:
+- blobs may never be removed from origin ("I_AGREE" argument)
+- blob writes must be manually synced outside of proxycache
+  ("disableOriginWrites" argument)
 
-      "/cache/": {
+      "/bs/": {
           "handler": "storage-proxycache",
           "handlerArgs": {
 		"origin": "/bs-remote-origin/",
 		"cache": "/bs-local-cache/",
                 "I_AGREE": "that blobs are never removed from origin",
+                "disableOriginWrites": true,
 		"meta": {
 		    "file": "/home/myUser/var/camlistore/proxycache.leveldb",
 		    "type": "leveldb"
@@ -58,10 +62,6 @@ property "I_AGREE" just like in the following config example:
 		"maxCacheBytes": 25165824
           }
       },
-
-Even if you enabled temporary offline support you still have to make
-sure that you writes are somewhen synced to origin. proxycache will not
-do this for you.
 
 */
 package proxycache // import "camlistore.org/pkg/blobserver/proxycache"
@@ -117,11 +117,12 @@ func (h *BlobAccessHeap) Pop() interface{} {
 }
 
 type sto struct {
-	origin         blobserver.Storage
-	cache          blobserver.Storage
-	kv             sorted.KeyValue
-	maxCacheBytes  int64
-	offlineSupport bool
+	origin              blobserver.Storage
+	cache               blobserver.Storage
+	kv                  sorted.KeyValue
+	maxCacheBytes       int64
+	disableRemoves      bool
+	disableOriginWrites bool
 
 	mu             sync.Mutex // guards cacheBytes, kv and blobAccess* mutations
 	cacheBytes     int64
@@ -135,11 +136,12 @@ func init() {
 
 func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobserver.Storage, err error) {
 	var (
-		origin        = config.RequiredString("origin")
-		cache         = config.RequiredString("cache")
-		kvConf        = config.RequiredObject("meta")
-		maxCacheBytes = config.OptionalInt64("maxCacheBytes", 512<<20)
-		agreement     = config.OptionalString("I_AGREE", "")
+		origin              = config.RequiredString("origin")
+		cache               = config.RequiredString("cache")
+		kvConf              = config.RequiredObject("meta")
+		maxCacheBytes       = config.OptionalInt64("maxCacheBytes", 512<<20)
+		agreement           = config.OptionalString("I_AGREE", "")
+		disableOriginWrites = config.OptionalBool("disableOriginWrites", false)
 	)
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -178,17 +180,16 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 	cacheBytes := calcCacheBytesFromBlobAccessMap(&blobAccessMap)
 	blobAccessHeap := builbBlobAccessHeapFromBlobAccessMap(&blobAccessMap)
 
-	// TODO we might should ensure that no entry is newer than 'now'... otherwise the blobAccessHeap will break when appending new entries
-
 	s := &sto{
-		origin:         originSto,
-		cache:          cacheSto,
-		cacheBytes:     cacheBytes,
-		maxCacheBytes:  maxCacheBytes,
-		kv:             kv,
-		blobAccessHeap: blobAccessHeap,
-		blobAccessMap:  blobAccessMap,
-		offlineSupport: agreement == "that blobs are never removed from origin",
+		origin:              originSto,
+		cache:               cacheSto,
+		cacheBytes:          cacheBytes,
+		maxCacheBytes:       maxCacheBytes,
+		kv:                  kv,
+		blobAccessHeap:      blobAccessHeap,
+		blobAccessMap:       blobAccessMap,
+		disableRemoves:      agreement == "that blobs are never removed from origin",
+		disableOriginWrites: disableOriginWrites,
 	}
 	s.EnforceCacheLimits()
 	return s, nil
@@ -305,6 +306,11 @@ func (sto *sto) touchBlobs(blobs []blob.SizedRef, contentCached bool) {
 				HeapIndex:     len(sto.blobAccessHeap),
 			}
 			sto.blobAccessMap[sb.Ref] = &blobAccess
+			// TODO we might should ensure that no entry is
+			// newer than 'now'... otherwise the
+			// blobAccessHeap will break when appending new
+			// entries. should be checked during heap
+			// initialization.
 			sto.blobAccessHeap = append(sto.blobAccessHeap, &blobAccess)
 		}
 
@@ -331,7 +337,6 @@ func (sto *sto) EnforceCacheLimits() {
 			kvBatch.Delete(droppedBlobAccess.Ref.String())
 			if droppedBlobAccess.ContentCached {
 				sto.cacheBytes -= int64(droppedBlobAccess.BlobSize)
-				log.Printf(">>>>>> dropping %v (ac: %d, size: %d, mx: %d > %d)", droppedBlobAccess.Ref, int(droppedBlobAccess.Access), droppedBlobAccess.BlobSize, int(sto.cacheBytes), int(sto.maxCacheBytes))
 				deletedRefs = append(deletedRefs, droppedBlobAccess.Ref)
 			}
 		}
@@ -344,7 +349,6 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 	rc, size, err = sto.cache.Fetch(b)
 	if err == nil {
 		sto.touchBlob(blob.SizedRef{Ref: b, Size: size}, true)
-		log.Printf(">>>>>> cache fetch %v", b)
 		return
 	}
 	if err != os.ErrNotExist {
@@ -364,13 +368,12 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 			return
 		}
 		sto.touchBlob(blob.SizedRef{Ref: b, Size: size}, true)
-		log.Printf(">>>>>> origin fetch %v", b)
 	}()
 	return ioutil.NopCloser(bytes.NewReader(all)), size, nil
 }
 
 func (sto *sto) StatBlobs(dest chan<- blob.SizedRef, blobs []blob.Ref) error {
-	if sto.offlineSupport {
+	if sto.disableRemoves {
 		sto.mu.Lock()
 		defer sto.mu.Unlock()
 
@@ -379,7 +382,6 @@ func (sto *sto) StatBlobs(dest chan<- blob.SizedRef, blobs []blob.Ref) error {
 			blobAccess, ok := sto.blobAccessMap[ref]
 			if ok {
 				dest <- blob.SizedRef{Ref: ref, Size: blobAccess.BlobSize}
-				log.Printf(">>>>>> cache stat %v", ref)
 			} else {
 				notCachedRefs = append(notCachedRefs, ref)
 			}
@@ -400,7 +402,6 @@ func (sto *sto) StatBlobs(dest chan<- blob.SizedRef, blobs []blob.Ref) error {
 				}
 				originStats = append(originStats, originRef)
 				dest <- originRef
-				log.Printf(">>>>>> origin stat %v", originRef.Ref)
 			}
 			sto.mu.Lock()
 			err := <-errCh
@@ -423,17 +424,19 @@ func (sto *sto) ReceiveBlob(br blob.Ref, src io.Reader) (sb blob.SizedRef, err e
 	if _, err = io.Copy(&buf, src); err != nil {
 		return
 	}
-
-	if _, err = sto.cache.ReceiveBlob(br, bytes.NewReader(buf.Bytes())); err != nil {
+	if sb, err = sto.cache.ReceiveBlob(br, bytes.NewReader(buf.Bytes())); err != nil {
 		return
 	}
 	sto.touchBlob(sb, true)
-	// TODO for full offline support we need to be independent of origin
-	return sto.origin.ReceiveBlob(br, bytes.NewReader(buf.Bytes()))
+	if sto.disableOriginWrites {
+		return
+	} else {
+		return sto.origin.ReceiveBlob(br, bytes.NewReader(buf.Bytes()))
+	}
 }
 
 func (sto *sto) RemoveBlobs(blobs []blob.Ref) error {
-	if sto.offlineSupport {
+	if sto.disableRemoves {
 		panic("proxycache in offline mode does not support removing blobs")
 	}
 	sto.RemoveFromCacheMetadata(blobs)
@@ -462,6 +465,5 @@ func (sto *sto) RemoveFromCacheMetadata(blobs []blob.Ref) {
 }
 
 func (sto *sto) EnumerateBlobs(ctx context.Context, dest chan<- blob.SizedRef, after string, limit int) error {
-	// TODO we should fallback to enumerating proxycache if origin fails and we're in offlineMode
 	return sto.origin.EnumerateBlobs(ctx, dest, after, limit)
 }
