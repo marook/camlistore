@@ -107,8 +107,8 @@ func (camliRoots *CamliRootsHandler) InitHandler(hl blobserver.FindHandlerByType
 }
 
 func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if !auth.Allowed(req, auth.OpRead) {
-		http.Error(rw, "Unauthorized", http.StatusUnauthorized)
+	if !auth.Allowed(req, auth.OpGet) {
+		auth.SendUnauthorized(rw, req)
 		return
 	}
 
