@@ -43,7 +43,7 @@ func (sh *Handler) serveDescribe(rw http.ResponseWriter, req *http.Request) {
 	dr.fromHTTP(req)
 	ctx := context.TODO()
 
-	res, err := sh.DescribeLocked(ctx, &dr)
+	res, err := sh.Describe(ctx, &dr)
 	if err != nil {
 		httputil.ServeJSONError(rw, err)
 		return
@@ -78,10 +78,10 @@ func (sh *Handler) DescribeLocked(ctx context.Context, dr *DescribeRequest) (dre
 	}
 	sh.initDescribeRequest(dr)
 	if dr.BlobRef.Valid() {
-		dr.Describe(ctx, dr.BlobRef, dr.depth())
+		dr.StartDescribe(ctx, dr.BlobRef, dr.depth())
 	}
 	for _, br := range dr.BlobRefs {
-		dr.Describe(ctx, br, dr.depth())
+		dr.StartDescribe(ctx, br, dr.depth())
 	}
 	if err := dr.expandRules(ctx); err != nil {
 		return nil, err
@@ -128,8 +128,9 @@ type DescribeRequest struct {
 	sh            *Handler
 	mu            sync.Mutex // protects following:
 	m             MetaMap
-	done          map[blobrefAndDepth]bool // blobref -> true
-	errs          map[string]error         // blobref -> error
+	started       map[blobrefAndDepth]bool // blobref -> true
+	blobDesLock   map[blob.Ref]*sync.Mutex
+	errs          map[string]error // blobref -> error
 	resFromRule   map[*DescribeRule]map[blob.Ref]bool
 	flatRuleCache []*DescribeRule // flattened once, by flatRules
 
@@ -240,6 +241,22 @@ type DescribedBlob struct {
 
 	// if camliType "directory"
 	DirChildren []blob.Ref `json:"dirChildren,omitempty"`
+
+	// Location specifies the location of the entity referenced
+	// by the blob.
+	//
+	// If camliType is "file", then location comes from the metadata
+	// (currently Exif) metadata of the file content.
+	//
+	// If camliType is "permanode", then location comes
+	// from one of the following sources:
+	//  1. Permanode attributes "latitude" and "longitude"
+	//  2. Referenced permanode attributes (eg. for "foursquare.com:checkin"
+	//     its "foursquareVenuePermanode")
+	//  3. Location in permanode camliContent file metadata
+	// The sources are checked in this order, the location from
+	// the first source yielding a valid result is returned.
+	Location *camtypes.Location `json:"location,omitempty"`
 
 	// Stub is set if this is not loaded, but referenced.
 	Stub bool `json:"-"`
@@ -566,7 +583,7 @@ func (dr *DescribeRequest) describedBlob(b blob.Ref) *DescribedBlob {
 }
 
 func (dr *DescribeRequest) DescribeSync(ctx context.Context, br blob.Ref) (*DescribedBlob, error) {
-	dr.Describe(ctx, br, 1)
+	dr.StartDescribe(ctx, br, 1)
 	res, err := dr.Result()
 	if err != nil {
 		return nil, err
@@ -574,26 +591,37 @@ func (dr *DescribeRequest) DescribeSync(ctx context.Context, br blob.Ref) (*Desc
 	return res[br.String()], nil
 }
 
-// Describe starts a lookup of br, down to the provided depth.
-// It returns immediately.
-func (dr *DescribeRequest) Describe(ctx context.Context, br blob.Ref, depth int) {
+// StartDescribe starts a lookup of br, down to the provided depth.
+// It returns immediately. One should call Result to wait for the description to
+// be completed.
+func (dr *DescribeRequest) StartDescribe(ctx context.Context, br blob.Ref, depth int) {
 	if depth <= 0 {
 		return
 	}
 	dr.mu.Lock()
 	defer dr.mu.Unlock()
-	if dr.done == nil {
-		dr.done = make(map[blobrefAndDepth]bool)
+	if dr.blobDesLock == nil {
+		dr.blobDesLock = make(map[blob.Ref]*sync.Mutex)
 	}
-	doneKey := blobrefAndDepth{br, depth}
-	if dr.done[doneKey] {
+	desBlobMu, ok := dr.blobDesLock[br]
+	if !ok {
+		desBlobMu = new(sync.Mutex)
+		dr.blobDesLock[br] = desBlobMu
+	}
+	if dr.started == nil {
+		dr.started = make(map[blobrefAndDepth]bool)
+	}
+	key := blobrefAndDepth{br, depth}
+	if dr.started[key] {
 		return
 	}
-	dr.done[doneKey] = true
+	dr.started[key] = true
 	dr.wg.Add(1)
 	go func() {
 		defer dr.wg.Done()
-		dr.describeReally(ctx, br, depth)
+		desBlobMu.Lock()
+		defer desBlobMu.Unlock()
+		dr.doDescribe(ctx, br, depth)
 	}()
 }
 
@@ -675,7 +703,7 @@ func (dr *DescribeRequest) expandRules(ctx context.Context) error {
 		}
 		dr.mu.Unlock()
 		for _, br := range new {
-			dr.Describe(ctx, br, 1)
+			dr.StartDescribe(ctx, br, 1)
 		}
 		dr.wg.Wait()
 		dr.mu.Lock()
@@ -696,7 +724,7 @@ func (dr *DescribeRequest) addError(br blob.Ref, err error) {
 	dr.errs[br.String()] = err
 }
 
-func (dr *DescribeRequest) describeReally(ctx context.Context, br blob.Ref, depth int) {
+func (dr *DescribeRequest) doDescribe(ctx context.Context, br blob.Ref, depth int) {
 	meta, err := dr.sh.index.GetBlobMeta(ctx, br)
 	if err == os.ErrNotExist {
 		return
@@ -719,6 +747,17 @@ func (dr *DescribeRequest) describeReally(ctx context.Context, br blob.Ref, dept
 	case "permanode":
 		des.Permanode = new(DescribedPermanode)
 		dr.populatePermanodeFields(ctx, des.Permanode, br, dr.sh.owner, depth)
+		var at time.Time
+		if !dr.At.IsAnyZero() {
+			at = dr.At.Time()
+		}
+		if loc, err := dr.sh.getPermanodeLocation(ctx, br, at); err == nil {
+			des.Location = &loc
+		} else {
+			if err != os.ErrNotExist {
+				log.Printf("getPermanodeLocation(permanode %s): %v", br, err)
+			}
+		}
 	case "file":
 		fi, err := dr.sh.index.GetFileInfo(ctx, br)
 		if err != nil {
@@ -742,6 +781,13 @@ func (dr *DescribeRequest) describeReally(ctx context.Context, br blob.Ref, dept
 		}
 		if mediaTags, err := dr.sh.index.GetMediaTags(ctx, br); err == nil {
 			des.MediaTags = mediaTags
+		}
+		if loc, err := dr.sh.index.GetFileLocation(ctx, br); err == nil {
+			des.Location = &loc
+		} else {
+			if err != os.ErrNotExist {
+				log.Printf("index.GetFileLocation(file %s): %v", br, err)
+			}
 		}
 	case "directory":
 		var g syncutil.Group
@@ -842,7 +888,7 @@ func (dr *DescribeRequest) getDirMembers(ctx context.Context, br blob.Ref, depth
 
 	var members []blob.Ref
 	for child := range ch {
-		dr.Describe(ctx, child, depth)
+		dr.StartDescribe(ctx, child, depth)
 		members = append(members, child)
 	}
 	if err := <-errch; err != nil {
@@ -854,7 +900,7 @@ func (dr *DescribeRequest) getDirMembers(ctx context.Context, br blob.Ref, depth
 func (dr *DescribeRequest) describeRefs(ctx context.Context, str string, depth int) {
 	for _, match := range blobRefPattern.FindAllString(str, -1) {
 		if ref, ok := blob.ParseKnown(match); ok {
-			dr.Describe(ctx, ref, depth-1)
+			dr.StartDescribe(ctx, ref, depth-1)
 		}
 	}
 }

@@ -63,7 +63,7 @@ type Corpus struct {
 	blobs        map[blob.Ref]*camtypes.BlobMeta
 	sumBlobBytes int64
 
-	// camlBlobs maps from camliType ("file") to blobref to the meta.
+	// camBlobs maps from camliType ("file") to blobref to the meta.
 	// The value is the same one in blobs.
 	camBlobs map[string]map[blob.Ref]*camtypes.BlobMeta
 
@@ -715,10 +715,17 @@ func (c *Corpus) br(br blob.Ref) blob.Ref {
 // ch is closed at the end. The err will either be nil or context.Canceled.
 func (c *Corpus) EnumerateCamliBlobs(ctx context.Context, camType string, ch chan<- camtypes.BlobMeta) error {
 	defer close(ch)
-	for t, m := range c.camBlobs {
-		if camType != "" && camType != t {
-			continue
+	if camType != "" {
+		for _, bm := range c.camBlobs[camType] {
+			select {
+			case ch <- *bm:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
+		return nil
+	}
+	for _, m := range c.camBlobs {
 		for _, bm := range m {
 			select {
 			case ch <- *bm:
@@ -1008,41 +1015,7 @@ func (c *Corpus) PermanodeAttrValue(permaNode blob.Ref,
 		}
 		return ""
 	}
-	if at.IsZero() {
-		at = time.Now()
-	}
-	var v []string
-	for _, cl := range pm.Claims {
-		if cl.Attr != attr || cl.Date.After(at) {
-			continue
-		}
-		if signerFilter.Valid() && signerFilter != cl.Signer {
-			continue
-		}
-		switch cl.Type {
-		case string(schema.DelAttributeClaim):
-			if cl.Value == "" {
-				v = v[:0]
-			} else {
-				i := 0
-				for _, w := range v {
-					if w != cl.Value {
-						v[i] = w
-						i++
-					}
-				}
-				v = v[:i]
-			}
-		case string(schema.SetAttributeClaim):
-			v = append(v[:0], cl.Value)
-		case string(schema.AddAttributeClaim):
-			v = append(v, cl.Value)
-		}
-	}
-	if len(v) != 0 {
-		return v[0]
-	}
-	return ""
+	return claimPtrsAttrValue(pm.Claims, attr, at, signerFilter)
 }
 
 // AppendPermanodeAttrValues appends to dst all the values for the attribute

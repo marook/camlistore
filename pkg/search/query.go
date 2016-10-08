@@ -121,7 +121,7 @@ type SearchQuery struct {
 
 func (q *SearchQuery) URLSuffix() string { return "camli/search/query" }
 
-func (q *SearchQuery) fromHTTP(req *http.Request) error {
+func (q *SearchQuery) FromHTTP(req *http.Request) error {
 	dec := json.NewDecoder(io.LimitReader(req.Body, 1<<20))
 	if err := dec.Decode(q); err != nil {
 		return err
@@ -336,6 +336,18 @@ func (c *Constraint) onlyMatchesPermanode() bool {
 	// Logical:{Op:'or', A:PermanodeConstraint{...}, B:PermanodeConstraint{...}
 
 	return false
+}
+
+func (c *Constraint) matchesFileByWholeRef() bool {
+	if c.Logical != nil && c.Logical.Op == "and" {
+		if c.Logical.A.matchesFileByWholeRef() || c.Logical.B.matchesFileByWholeRef() {
+			return true
+		}
+	}
+	if c.File == nil {
+		return false
+	}
+	return c.File.WholeRef.Valid()
 }
 
 type FileConstraint struct {
@@ -941,6 +953,9 @@ func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
 			if corpus == nil {
 				return nil, errors.New("TODO: Sorting without a corpus unsupported")
 			}
+			if !q.Constraint.onlyMatchesPermanode() {
+				return nil, errors.New("can only sort by ctime when all results are permanodes")
+			}
 			var err error
 			sort.Sort(sortSearchResultBlobs{res.Blobs, func(a, b *SearchResultBlob) bool {
 				if err != nil {
@@ -1069,6 +1084,14 @@ func (q *SearchQuery) pickCandidateSource(s *search) (src candidateSource) {
 			default:
 				src.sorted = false
 			}
+		}
+		// fastpath for files
+		if c.matchesFileByWholeRef() {
+			src.name = "corpus_file_meta"
+			src.send = func(ctx context.Context, s *search, dst chan<- camtypes.BlobMeta) error {
+				return corpus.EnumerateCamliBlobs(ctx, "file", dst)
+			}
+			return
 		}
 		if c.AnyCamliType || c.CamliType != "" {
 			camType := c.CamliType // empty means all

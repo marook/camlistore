@@ -22,6 +22,7 @@ package leveldb // import "camlistore.org/pkg/sorted/leveldb"
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 
@@ -43,7 +44,7 @@ func init() {
 }
 
 // NewStorage is a convenience that calls newKeyValueFromJSONConfig
-// with file as the leveldb storage file.
+// with file as the leveldb storage directory.
 func NewStorage(file string) (sorted.KeyValue, error) {
 	return newKeyValueFromJSONConfig(jsonconfig.Obj{"file": file})
 }
@@ -109,7 +110,8 @@ func (is *kvis) Get(key string) (string, error) {
 
 func (is *kvis) Set(key, value string) error {
 	if err := sorted.CheckSizes(key, value); err != nil {
-		return err
+		log.Printf("Skipping storing (%q:%q): %v", key, value, err)
+		return nil
 	}
 	return is.db.Put([]byte(key), []byte(value), is.writeOpts)
 }
@@ -172,11 +174,7 @@ func (lvb *lvbatch) Set(key, value string) {
 		return
 	}
 	if err := sorted.CheckSizes(key, value); err != nil {
-		if err == sorted.ErrKeyTooLarge {
-			lvb.err = fmt.Errorf("%v: %v", err, key)
-		} else {
-			lvb.err = fmt.Errorf("%v: %v", err, value)
-		}
+		log.Printf("Skipping storing (%q:%q): %v", key, value, err)
 		return
 	}
 	lvb.batch.Put([]byte(key), []byte(value))
@@ -208,13 +206,15 @@ type iter struct {
 
 	skey, sval *string // for caching string values
 
+	// closed is not strictly necessary, but helps us detect programmer
+	// errors like calling Next on a Closed iterator (which panics).
 	closed bool
 }
 
 func (it *iter) Close() error {
 	it.closed = true
 	it.it.Release()
-	return nil
+	return it.it.Error()
 }
 
 func (it *iter) KeyBytes() []byte {
@@ -244,11 +244,8 @@ func (it *iter) Value() string {
 }
 
 func (it *iter) Next() bool {
-	if err := it.it.Error(); err != nil {
-		return false
-	}
 	if it.closed {
-		panic("Next called after Next returned value")
+		panic("Next called on closed iterator")
 	}
 	it.skey, it.sval = nil, nil
 	return it.it.Next()

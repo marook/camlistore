@@ -35,9 +35,12 @@
 			"enabled": ["_env", "${CAMLI_PUBLISH_ENABLED}"],
 			"handlerArgs": {
 				"program": "publisher",
+				"prefix": "/pics/",
+				"serverListen": "localhost:3179",
+				"serverBaseURL": ["_env", "${CAMLI_BASEURL}"],
 				"appConfig": {
 					"camliRoot": "dev-pics-root",
-					"sourceRoot": ["_env", "${CAMLI_DEV_CAMLI_ROOT}", ""],
+					"sourceRoot": ["_env", "${CAMLI_DEV_CAMLI_ROOT}/app/publisher", ""],
 					"cacheRoot": ["_env", "${CAMLI_ROOT_CACHE}"],
 					"goTemplate": "gallery.html"
 				}
@@ -57,8 +60,8 @@
 				"sourceRoot": ["_env", "${CAMLI_DEV_CAMLI_ROOT}", ""],
 				"cache": "/cache/",
 				"scaledImage": {
-					"type": "kv",
-					"file": ["_env", "${CAMLI_ROOT_CACHE}/thumbnails.kv", ""]
+					"type": "leveldb",
+					"file": ["_env", "${CAMLI_ROOT_CACHE}/thumbnails.leveldb", ""]
 				}
 			}
 		},
@@ -127,9 +130,9 @@
 				"smallBlobs": "/bs-loose/",
 				"largeBlobs": "/bs-packed/",
 				"metaIndex": {
-					"type": "kv",
-					"file": ["_env", "${CAMLI_ROOT}/packindex.kv"]
-                                }
+					"type": "leveldb",
+					"file": ["_env", "${CAMLI_ROOT}/packindex.leveldb"]
+				}
 			}
 		},
 
