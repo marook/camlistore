@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"camlistore.org/pkg/auth"
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/blobserver"
 	"camlistore.org/pkg/client"
@@ -60,14 +61,14 @@ type CamliRootsHandler struct {
 }
 
 func init() {
-	blobserver.RegisterHandlerConstructor("camli-roots",  camliRootsFromConfig)
+	blobserver.RegisterHandlerConstructor("camli-roots", camliRootsFromConfig)
 }
 
 func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
 	camliRoots := &CamliRootsHandler{
 		// TODO maybe we should try not to mix client and server access to the blobs here
 		client: client.NewOrFail(), // automatic from flags
-		search: nil, // initialized by InitHandler(...)
+		search: nil,                // initialized by InitHandler(...)
 	}
 
 	if err = conf.Validate(); err != nil {
@@ -84,7 +85,7 @@ func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Han
 		return nil, errors.New("failed to find the 'root' handler")
 	}
 
-	return camliRoots, nil	
+	return camliRoots, nil
 }
 
 func (camliRoots *CamliRootsHandler) InitHandler(hl blobserver.FindHandlerByTyper) error {
@@ -106,11 +107,16 @@ func (camliRoots *CamliRootsHandler) InitHandler(hl blobserver.FindHandlerByType
 }
 
 func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if !auth.Allowed(req, auth.OpRead) {
+		http.Error(rw, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if req.Method != "GET" {
 		http.Error(rw, "Invalid method", http.StatusBadRequest)
 		return
 	}
-	
+
 	pathSegments := strings.Split(httputil.PathSuffix(req), "/")
 	if len(pathSegments) < 1 {
 		http.Error(rw, "Not found.", http.StatusNotFound)
@@ -147,7 +153,7 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 		}
 
 		dr := &search.DescribeRequest{
-			Depth: 1,
+			Depth:    1,
 			BlobRefs: []blob.Ref{nextBlobRef},
 		}
 		dres, err := camliRoots.client.Describe(context.TODO(), dr)
@@ -205,12 +211,12 @@ func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camli
 			}
 		}
 	}
-	
+
 	http.Error(rw, "Not found.", http.StatusNotFound)
 	return nil, errors.New("No camliRoot found with that name")
 }
 
-func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWriter, req *http.Request, permanodeDescribe *search.DescribedBlob){
+func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWriter, req *http.Request, permanodeDescribe *search.DescribedBlob) {
 	// TODO large parts of this function are copied from download.go#ServeHTTP(...). should be refactored to reduce duplication.
 	if req.Header.Get("If-Modified-Since") != "" {
 		// TODO compare some dates
@@ -236,7 +242,7 @@ func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWrite
 
 	h := rw.Header()
 	h.Set("Content-Length", fmt.Sprint(fi.size))
-	h.Set("Expires", time.Now().Add(oneYear).Format(http.TimeFormat))
+	h.Set("Expires", time.Now().Add(60*time.Second).Format(http.TimeFormat))
 	h.Set("Content-Type", fi.mime)
 
 	if fi.mime == "application/octet-stream" {
