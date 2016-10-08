@@ -242,7 +242,7 @@ func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWrite
 
 	h := rw.Header()
 	h.Set("Content-Length", fmt.Sprint(fi.size))
-	h.Set("Expires", time.Now().Add(oneYear).Format(http.TimeFormat))
+	h.Set("Expires", time.Now().Add(60*time.Second).Format(http.TimeFormat))
 	h.Set("Content-Type", fi.mime)
 
 	if fi.mime == "application/octet-stream" {
