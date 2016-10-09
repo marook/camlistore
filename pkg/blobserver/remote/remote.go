@@ -30,6 +30,9 @@ Example low-level config:
           }
      },
 
+You can specifiy an optional "trustedCert" option below the handlerArgs
+if you are using a self signed https certificate.
+
 */
 package remote // import "camlistore.org/pkg/blobserver/remote"
 
@@ -63,11 +66,14 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (storage blobserv
 	url := config.RequiredString("url")
 	auth := config.RequiredString("auth")
 	skipStartupCheck := config.OptionalBool("skipStartupCheck", false)
+	trustedCert := config.OptionalString("trustedCert", "")
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 
-	client := client.New(url)
+	client := client.New(url,
+		client.OptionTrustedCert(trustedCert),
+	)
 	if err = client.SetupAuthFromString(auth); err != nil {
 		return nil, err
 	}
