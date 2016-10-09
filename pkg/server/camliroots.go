@@ -218,18 +218,17 @@ func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camli
 
 func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWriter, req *http.Request, permanodeDescribe *search.DescribedBlob) {
 	// TODO large parts of this function are copied from download.go#ServeHTTP(...). should be refactored to reduce duplication.
-	if req.Header.Get("If-Modified-Since") != "" {
-		// TODO compare some dates
-		// rw.WriteHeader(http.StatusNotModified)
-		// return
-	}
-
 	// TODO make sure that we actually got ONE camliContent attribute
 	contentRefStr := permanodeDescribe.Permanode.Attr.Get("camliContent")
 	file, ok := blob.Parse(contentRefStr)
 	if !ok {
 		log.Printf("Failed to parse ref %s", contentRefStr)
 		http.Error(rw, "Server error", http.StatusInternalServerError)
+		return
+	}
+
+	if req.Header.Get("If-None-Match") == contentRefStr {
+		rw.WriteHeader(http.StatusNotModified)
 		return
 	}
 
@@ -244,6 +243,7 @@ func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWrite
 	h.Set("Content-Length", fmt.Sprint(fi.size))
 	h.Set("Expires", time.Now().Add(60*time.Second).Format(http.TimeFormat))
 	h.Set("Content-Type", fi.mime)
+	h.Set("ETag", contentRefStr)
 
 	if fi.mime == "application/octet-stream" {
 		// Chrome seems to silently do nothing on
