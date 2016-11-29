@@ -77,11 +77,23 @@ type claimPtrSlice []*camtypes.Claim
 func (s claimPtrSlice) Len() int                    { return len(s) }
 func (s claimPtrSlice) Claim(i int) *camtypes.Claim { return s[i] }
 
+// claimsIntfAttrValue finds the value of an attribute in a list of claims
+// or empty string if not found. claims must be non-nil.
 func claimsIntfAttrValue(claims claimsIntf, attr string, at time.Time, signerFilter blob.Ref) string {
+	if claims == nil {
+		panic("nil claims argument in claimsIntfAttrValue")
+	}
+
 	if at.IsZero() {
 		at = time.Now()
 	}
-	var v []string
+
+	// use a small static buffer as it speeds up
+	// search.BenchmarkQueryPermanodeLocation by 6-7%
+	// with go 1.7.1
+	var buf [8]string
+	v := buf[:][:0]
+
 	for i := 0; i < claims.Len(); i++ {
 		cl := claims.Claim(i)
 		if cl.Attr != attr || cl.Date.After(at) {

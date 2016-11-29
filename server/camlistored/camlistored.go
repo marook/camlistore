@@ -46,6 +46,7 @@ import (
 	"camlistore.org/pkg/osutil/gce" // for init side-effects + LogWriter
 
 	// Storage options:
+	_ "camlistore.org/pkg/blobserver/b2"
 	"camlistore.org/pkg/blobserver/blobpacked"
 	_ "camlistore.org/pkg/blobserver/cond"
 	_ "camlistore.org/pkg/blobserver/diskpacked"
@@ -90,6 +91,7 @@ import (
 
 var (
 	flagVersion    = flag.Bool("version", false, "show version")
+	flagHelp       = flag.Bool("help", false, "show usage")
 	flagLegal      = flag.Bool("legal", false, "show licenses")
 	flagConfigFile = flag.String("configfile", "",
 		"Config file to use, relative to the Camlistore configuration directory root. "+
@@ -98,7 +100,7 @@ var (
 	flagListen      = flag.String("listen", "", "host:port to listen on, or :0 to auto-select. If blank, the value in the config will be used instead.")
 	flagOpenBrowser = flag.Bool("openbrowser", true, "Launches the UI on startup")
 	flagReindex     = flag.Bool("reindex", false, "Reindex all blobs on startup")
-	flagRecovery    = flag.Bool("recovery", false, "Recovery mode: rebuild the blobpacked meta index if needed. The tasks performed by the recovery mode might change in the future.")
+	flagRecovery    = flag.Bool("recovery", false, "Recovery mode: rebuild the blobpacked meta index. The tasks performed by the recovery mode might change in the future.")
 	flagPollParent  bool
 )
 
@@ -362,6 +364,10 @@ func Main(up chan<- struct{}, down <-chan struct{}) {
 		fmt.Fprintf(os.Stderr, "camlistored version: %s\nGo version: %s (%s/%s)\n",
 			buildinfo.Version(), runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		return
+	}
+	if *flagHelp {
+		flag.Usage()
+		os.Exit(0)
 	}
 	if *flagLegal {
 		for _, l := range legal.Licenses() {

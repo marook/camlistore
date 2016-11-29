@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -45,20 +46,19 @@ import (
 	"camlistore.org/pkg/osutil"
 	"camlistore.org/pkg/types/camtypes"
 
+	"cloud.google.com/go/compute/metadata"
+	"cloud.google.com/go/datastore"
+	"cloud.google.com/go/logging"
+	"cloud.google.com/go/storage"
 	"github.com/russross/blackfriday"
 	"go4.org/cloud/cloudlaunch"
 	"go4.org/writerutil"
+	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/context"
-	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	compute "google.golang.org/api/compute/v1"
+	"google.golang.org/api/option"
 	storageapi "google.golang.org/api/storage/v1"
-	"google.golang.org/cloud"
-	"google.golang.org/cloud/compute/metadata"
-	"google.golang.org/cloud/datastore"
-	"google.golang.org/cloud/logging"
-	"google.golang.org/cloud/storage"
-	"rsc.io/letsencrypt"
 )
 
 const defaultAddr = ":31798" // default webserver address
@@ -81,6 +81,7 @@ var (
 	gceJWTFile   = flag.String("gce_jwt_file", "", "If non-empty, a filename to the GCE Service Account's JWT (JSON) config file.")
 	gitContainer = flag.Bool("git_container", false, "Use git from the `camlistore/git` Docker container; if false, the system `git` is used.")
 
+	adminEmail         = flag.String("email", "", "Address that Let's Encrypt will notify about problems with issued certificates")
 	flagChromeBugRepro = flag.Bool("chrome_bug", false, "Run the chrome bug repro demo for issue #660. True in production.")
 )
 
@@ -477,9 +478,9 @@ func runAsChild(res string) {
 	}()
 }
 
-func gceDeployHandlerConfig(ctx context.Context) (*gce.Config, error) {
+func gceDeployHandlerConfig() (*gce.Config, error) {
 	if inProd {
-		return deployerCredsFromGCS(ctx)
+		return deployerCredsFromGCS()
 	}
 	clientId := os.Getenv("CAMLI_GCE_CLIENTID")
 	if clientId != "" {
@@ -509,7 +510,7 @@ func gceDeployHandlerConfig(ctx context.Context) (*gce.Config, error) {
 // - in production, the launcher-config.json file is not found in the relevant bucket
 // - neither CAMLI_GCE_CLIENTID is set, nor launcher-config.json is found in the
 // camlistore server config dir.
-func gceDeployHandler(ctx context.Context, prefix string) (*gce.DeployHandler, error) {
+func gceDeployHandler(prefix string) (*gce.DeployHandler, error) {
 	var hostPort string
 	var err error
 	scheme := "https"
@@ -528,7 +529,7 @@ func gceDeployHandler(ctx context.Context, prefix string) (*gce.DeployHandler, e
 			return nil, fmt.Errorf("invalid -https flag: %v", err)
 		}
 	}
-	config, err := gceDeployHandlerConfig(ctx)
+	config, err := gceDeployHandlerConfig()
 	if config == nil {
 		return nil, err
 	}
@@ -572,8 +573,8 @@ func checkInProduction() bool {
 }
 
 const (
-	prodSrcDir  = "/var/camweb/src/camlistore.org"
-	prodLECache = "/var/le/letsencrypt.cache"
+	prodSrcDir     = "/var/camweb/src/camlistore.org"
+	prodLECacheDir = "/var/le/letsencrypt.cache"
 )
 
 func setProdFlags() {
@@ -594,6 +595,7 @@ func setProdFlags() {
 	*root = filepath.Join(prodSrcDir, "website")
 	*gitContainer = true
 
+	*adminEmail = "mathieu.lonjaret@gmail.com" // for let's encrypt
 	*emailsTo = "camlistore-commits@googlegroups.com"
 	*smtpServer = "50.19.239.94:2500" // double firewall: rinetd allow + AWS
 
@@ -685,6 +687,9 @@ func runDemoBlobserverLoop() {
 }
 
 func sendStartingEmail() {
+	if *smtpServer == "" {
+		return
+	}
 	contentRev, err := exec.Command("docker", "run",
 		"--rm",
 		"-v", "/var/camweb:/var/camweb",
@@ -696,6 +701,7 @@ func sendStartingEmail() {
 	cl, err := smtp.Dial(*smtpServer)
 	if err != nil {
 		log.Printf("Failed to connect to SMTP server: %v", err)
+		return
 	}
 	defer cl.Quit()
 	if err = cl.Mail("noreply@camlistore.org"); err != nil {
@@ -735,31 +741,21 @@ func getDockerImage(tag, file string) {
 	}
 }
 
-// ctxt returns a Context suitable for Google Cloud Storage or Google Cloud
+// httpClient returns an http Client suitable for Google Cloud Storage or Google Cloud
 // Logging calls with the projID project ID.
-func ctxt(projID string) context.Context {
-	var hc *http.Client
-	if *gceJWTFile != "" {
-		jsonSlurp, err := ioutil.ReadFile(*gceJWTFile)
-		if err != nil {
-			log.Fatalf("Error reading --gce_jwt_file value: %v", err)
-		}
-		jwtConf, err := google.JWTConfigFromJSON(jsonSlurp, logging.Scope)
-		if err != nil {
-			log.Fatalf("Error reading --gce_jwt_file value: %v", err)
-		}
-		hc = jwtConf.Client(context.Background())
-	} else {
-		if !metadata.OnGCE() {
-			log.Fatal("No --gce_jwt_file and not running on GCE.")
-		}
-		var err error
-		hc, err = google.DefaultClient(oauth2.NoContext)
-		if err != nil {
-			log.Fatal(err)
-		}
+func httpClient(projID string) *http.Client {
+	if *gceJWTFile == "" {
+		log.Fatal("Cannot initialize an authorized http Client without --gce_jwt_file")
 	}
-	return cloud.NewContext(projID, hc)
+	jsonSlurp, err := ioutil.ReadFile(*gceJWTFile)
+	if err != nil {
+		log.Fatalf("Error reading --gce_jwt_file value: %v", err)
+	}
+	jwtConf, err := google.JWTConfigFromJSON(jsonSlurp, logging.Scope)
+	if err != nil {
+		log.Fatalf("Error reading --gce_jwt_file value: %v", err)
+	}
+	return jwtConf.Client(context.Background())
 }
 
 // projectID returns the GCE project ID used for running this camweb on GCE
@@ -824,16 +820,7 @@ func main() {
 		})
 	}
 
-	// ctx initialized now, because gceLauncher needs it first (when in prod).
-	// Other users are the GCE logger, and serveHTTPS (in prod).
-	var ctx context.Context
-	var projID string
-	if inProd || *gceLogName != "" {
-		projID = projectID()
-		ctx = ctxt(projID)
-	}
-
-	gceLauncher, err := gceDeployHandler(ctx, "/launch/")
+	gceLauncher, err := gceDeployHandler("/launch/")
 	if err != nil {
 		log.Printf("Not installing GCE /launch/ handler: %v", err)
 		mux.HandleFunc("/launch/", func(w http.ResponseWriter, r *http.Request) {
@@ -848,7 +835,18 @@ func main() {
 		handler = NewLoggingHandler(handler, NewApacheLogger(*logDir, *logStdout))
 	}
 	if *gceLogName != "" {
-		logc, err := logging.NewClient(ctx, projID, *gceLogName)
+		projID := projectID()
+		var hc *http.Client
+		if !metadata.OnGCE() {
+			hc = httpClient(projID)
+		}
+		ctx := context.Background()
+		var logc *logging.Client
+		if metadata.OnGCE() {
+			logc, err = logging.NewClient(ctx, projID, *gceLogName)
+		} else {
+			logc, err = logging.NewClient(ctx, projID, *gceLogName, option.WithHTTPClient(hc))
+		}
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -857,7 +855,12 @@ func main() {
 		}
 		handler = NewLoggingHandler(handler, gceLogger{logc})
 		if gceLauncher != nil {
-			logc, err := logging.NewClient(ctx, projID, *gceLogName)
+			var logc *logging.Client
+			if metadata.OnGCE() {
+				logc, err = logging.NewClient(ctx, projID, *gceLogName)
+			} else {
+				logc, err = logging.NewClient(ctx, projID, *gceLogName, option.WithHTTPClient(hc))
+			}
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -893,7 +896,7 @@ func main() {
 	httpsErr := make(chan error)
 	if *httpsAddr != "" {
 		go func() {
-			httpsErr <- serveHTTPS(ctx, httpServer)
+			httpsErr <- serveHTTPS(httpServer)
 		}()
 	}
 
@@ -913,27 +916,39 @@ func main() {
 	}
 }
 
-func serveHTTPS(ctx context.Context, httpServer *http.Server) error {
+func serveHTTPS(httpServer *http.Server) error {
 	log.Printf("Starting TLS server on %s", *httpsAddr)
 	httpsServer := new(http.Server)
 	*httpsServer = *httpServer
 	httpsServer.Addr = *httpsAddr
-	cacheFile := "letsencrypt.cache"
+	cacheDir := autocert.DirCache("letsencrypt.cache")
+	var domain string
 	if !inProd {
 		if *tlsCertFile != "" && *tlsKeyFile != "" {
 			return httpsServer.ListenAndServeTLS(*tlsCertFile, *tlsKeyFile)
 		}
 		// Otherwise use Let's Encrypt, i.e. same use case as in prod
-	} else {
-		cacheFile = prodLECache
-		if err := os.MkdirAll(filepath.Dir(cacheFile), 0755); err != nil {
+		if strings.HasPrefix(*httpsAddr, ":") {
+			return errors.New("for Let's Encrypt, -https needs to start with a host name")
+		}
+		host, _, err := net.SplitHostPort(*httpsAddr)
+		if err != nil {
 			return err
 		}
+		domain = host
+	} else {
+		domain = "camlistore.org"
+		cacheDir = autocert.DirCache(prodLECacheDir)
 	}
-	var m letsencrypt.Manager
-	if err := m.CacheFile(cacheFile); err != nil {
-		return err
+	m := autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(domain),
+		Cache:      cacheDir,
 	}
+	if *adminEmail != "" {
+		m.Email = *adminEmail
+	}
+
 	httpsServer.TLSConfig = &tls.Config{
 		GetCertificate: m.GetCertificate,
 	}
@@ -959,7 +974,8 @@ func (ln tcpKeepAliveListener) Accept() (c net.Conn, err error) {
 	return tc, nil
 }
 
-func deployerCredsFromGCS(ctx context.Context) (*gce.Config, error) {
+func deployerCredsFromGCS() (*gce.Config, error) {
+	ctx := context.Background()
 	sc, err := storage.NewClient(ctx)
 	if err != nil {
 		return nil, err
