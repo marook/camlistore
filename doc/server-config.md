@@ -22,7 +22,7 @@ This page documents the simple configuration mode.
     localhost auth
   * `userpass:alice:secret:vivify=othersecret`: Alice has password "secret",
     but her Android phone can use password "othersecret" to do a minimal set of
-    operations (upload new things, but not access anything)r
+    operations (upload new things, but not access anything).
 
 * `baseURL`: Optional. If non-empty, this is the root of your URL prefix for
   your Camlistore server. Useful for when running behind a reverse proxy.
@@ -89,7 +89,7 @@ storage and the other ones are set up as mirrors. The precedence order is the
 same as the order they are listed above.
 
 Others aren't yet supported by the simple config mode. Patches to
-`pkg/genconfig` welcome.
+[pkg/serverinit](https://camlistore.org/pkg/serverinit/genconfig.go) welcome.
 
 
 ## Indexing options {#indexing}
