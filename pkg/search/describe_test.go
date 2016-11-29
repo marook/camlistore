@@ -358,13 +358,15 @@ func TestDescribeLocation(t *testing.T) {
 	tests := []struct {
 		ref       string
 		lat, long float64
+		hasNoLoc  bool
 	}{
-		{"filewithloc-0", 45, 56},
-		{"location-0", 45, 56},
-		{"locationpriority-1", 67, 78},
-		{"locationpriority-2", 12, 34},
-		{"locationoverride-1", 67, 78},
-		{"locationoverride-2", 67, 78},
+		{ref: "filewithloc-0", lat: 45, long: 56},
+		{ref: "location-0", lat: 45, long: 56},
+		{ref: "locationpriority-1", lat: 67, long: 78},
+		{ref: "locationpriority-2", lat: 12, long: 34},
+		{ref: "locationoverride-1", lat: 67, long: 78},
+		{ref: "locationoverride-2", lat: 67, long: 78},
+		{ref: "homedir-0", hasNoLoc: true},
 	}
 
 	ix := searchDescribeSetup(test.NewFakeIndex())
@@ -391,13 +393,49 @@ func TestDescribeLocation(t *testing.T) {
 			continue
 		}
 		loc := db.Location
-		if loc == nil {
-			t.Errorf("no location in result for %v", br)
-			continue
+		if tt.hasNoLoc {
+			if loc != nil {
+				t.Errorf("got location for %v, should have no location", br)
+			}
+		} else {
+			if loc == nil {
+				t.Errorf("no location in result for %v", br)
+				continue
+			}
+			if loc.Latitude != tt.lat || loc.Longitude != tt.long {
+				t.Errorf("location for %v invalid, got %f,%f want %f,%f",
+					tt.ref, loc.Latitude, loc.Longitude, tt.lat, tt.long)
+			}
 		}
-		if loc.Latitude != tt.lat || loc.Longitude != tt.long {
-			t.Errorf("location for %v invalid, got %f,%f want %f,%f",
-				tt.ref, loc.Latitude, loc.Longitude, tt.lat, tt.long)
-		}
+	}
+}
+
+// To make sure we don't regress into issue 881: i.e. a permanode with no attr
+// should not lead us to call index.claimsIntfAttrValue with a nil claims argument.
+func TestDescribePermNoAttr(t *testing.T) {
+	ix := index.NewMemoryIndex()
+	ctx := context.Background()
+	h := search.NewHandler(ix, owner)
+	corpus, err := ix.KeepInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.SetCorpus(corpus)
+	id := indextest.NewIndexDeps(ix)
+	br := id.NewPlannedPermanode("noattr-0")
+
+	ix.RLock()
+	defer ix.RUnlock()
+
+	res, err := h.Describe(ctx, &search.DescribeRequest{
+		BlobRef: br,
+		Depth:   1,
+	})
+	if err != nil {
+		t.Fatalf("Describe for %v failed: %v", br, err)
+	}
+	db := res.Meta[br.String()]
+	if db == nil {
+		t.Fatalf("Describe result for %v is missing", br)
 	}
 }
