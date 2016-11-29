@@ -1,9 +1,13 @@
 package search_test
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io/ioutil"
 	"path/filepath"
 	"reflect"
@@ -14,6 +18,7 @@ import (
 	"time"
 
 	"camlistore.org/pkg/blob"
+	"camlistore.org/pkg/geocode"
 	"camlistore.org/pkg/index"
 	"camlistore.org/pkg/index/indextest"
 	"camlistore.org/pkg/osutil"
@@ -541,6 +546,57 @@ func TestQueryPermanodeValueMatchesFloat(t *testing.T) {
 			},
 		}
 		qt.wantRes(sq, p1, p2)
+	})
+}
+
+func TestQueryPermanodeLocation(t *testing.T) {
+	testQuery(t, func(qt *queryTest) {
+		id := qt.id
+
+		p1 := id.NewPlannedPermanode("1")
+		p2 := id.NewPlannedPermanode("2")
+		p3 := id.NewPlannedPermanode("3")
+		id.SetAttribute(p1, "latitude", "51.5")
+		id.SetAttribute(p1, "longitude", "0")
+		id.SetAttribute(p2, "latitude", "51.5")
+		id.SetAttribute(p3, "longitude", "0")
+
+		p4 := id.NewPlannedPermanode("checkin")
+		p5 := id.NewPlannedPermanode("venue")
+		id.SetAttribute(p4, "camliNodeType", "foursquare.com:checkin")
+		id.SetAttribute(p4, "foursquareVenuePermanode", p5.String())
+		id.SetAttribute(p5, "latitude", "1.0")
+		id.SetAttribute(p5, "longitude", "2.0")
+
+		// Upload a basic image
+		camliRootPath, err := osutil.GoPackagePath("camlistore.org")
+		if err != nil {
+			panic("Package camlistore.org no found in $GOPATH or $GOPATH not defined")
+		}
+		uploadFile := func(file string, modTime time.Time) blob.Ref {
+			fileName := filepath.Join(camliRootPath, "pkg", "search", "testdata", file)
+			contents, err := ioutil.ReadFile(fileName)
+			if err != nil {
+				panic(err)
+			}
+			br, _ := id.UploadFile(file, string(contents), modTime)
+			return br
+		}
+		fileRef := uploadFile("dude-gps.jpg", time.Time{})
+
+		p6 := id.NewPlannedPermanode("photo")
+		id.SetAttribute(p6, "camliContent", fileRef.String())
+
+		sq := &SearchQuery{
+			Constraint: &Constraint{
+				Permanode: &PermanodeConstraint{
+					Location: &LocationConstraint{
+						Any: true,
+					},
+				},
+			},
+		}
+		qt.wantRes(sq, p1, p4, p5, p6)
 	})
 }
 
@@ -1578,4 +1634,273 @@ func BenchmarkQueryPermanodeLocation(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkLocationPredicate aims at measuring the impact of
+// https://camlistore-review.googlesource.com/8049
+// ( + https://camlistore-review.googlesource.com/8649)
+// on location queries.
+// It populates the corpus with enough fake foursquare checkins/venues and
+// twitter locations to look realistic.
+func BenchmarkLocationPredicate(b *testing.B) {
+	b.ReportAllocs()
+	testQueryTypes(b, corpusTypeOnly, func(qt *queryTest) {
+		id := qt.id
+
+		var n int
+		newPn := func() blob.Ref {
+			n++
+			return id.NewPlannedPermanode(fmt.Sprint(n))
+		}
+
+		// create (~700) venues all over the world, and mark 25% of them as places we've been to
+		venueIdx := 0
+		for long := -180.0; long < 180.0; long += 10.0 {
+			for lat := -90.0; lat < 90.0; lat += 10.0 {
+				pn := newPn()
+				id.SetAttribute(pn, "camliNodeType", "foursquare.com:venue")
+				id.SetAttribute(pn, "latitude", fmt.Sprintf("%f", lat))
+				id.SetAttribute(pn, "longitude", fmt.Sprintf("%f", long))
+				if venueIdx%4 == 0 {
+					qn := newPn()
+					id.SetAttribute(qn, "camliNodeType", "foursquare.com:checkin")
+					id.SetAttribute(qn, "foursquareVenuePermanode", pn.String())
+				}
+				venueIdx++
+			}
+		}
+
+		// create 3K tweets, all with locations
+		lat := 45.18
+		long := 5.72
+		for i := 0; i < 3000; i++ {
+			pn := newPn()
+			id.SetAttribute(pn, "camliNodeType", "twitter.com:tweet")
+			id.SetAttribute(pn, "latitude", fmt.Sprintf("%f", lat))
+			id.SetAttribute(pn, "longitude", fmt.Sprintf("%f", long))
+			lat += 0.01
+			long += 0.01
+		}
+
+		// create 5K additional permanodes, but no location. Just as "noise".
+		for i := 0; i < 5000; i++ {
+			newPn()
+		}
+
+		// Create ~2600 photos all over the world.
+		for long := -180.0; long < 180.0; long += 5.0 {
+			for lat := -90.0; lat < 90.0; lat += 5.0 {
+				br, _ := id.UploadFile("photo.jpg", exifFileContentLatLong(lat, long), time.Time{})
+				pn := newPn()
+				id.SetAttribute(pn, "camliContent", br.String())
+			}
+		}
+
+		h := qt.Handler()
+		b.ResetTimer()
+
+		locations := []string{
+			"canada", "scotland", "france", "sweden", "germany", "poland", "russia", "algeria", "congo", "china", "india", "australia", "mexico", "brazil", "argentina",
+		}
+		for i := 0; i < b.N; i++ {
+			for _, loc := range locations {
+				req := &SearchQuery{
+					Expression: "loc:" + loc,
+					Limit:      -1,
+				}
+				resp, err := h.Query(req)
+				if err != nil {
+					qt.t.Fatal(err)
+				}
+				b.Logf("found %d permanodes in %v", len(resp.Blobs), loc)
+			}
+		}
+
+	})
+}
+
+var altLocCache = make(map[string][]geocode.Rect)
+
+func init() {
+	cacheGeo := func(address string, n, e, s, w float64) {
+		altLocCache[address] = []geocode.Rect{{
+			NorthEast: geocode.LatLong{Lat: n, Long: e},
+			SouthWest: geocode.LatLong{Lat: s, Long: w},
+		}}
+	}
+
+	cacheGeo("canada", 83.0956562, -52.6206965, 41.6765559, -141.00187)
+	cacheGeo("scotland", 60.8607515, -0.7246751, 54.6332381, -8.6498706)
+	cacheGeo("france", 51.0891285, 9.560067700000001, 41.3423275, -5.142307499999999)
+	cacheGeo("sweden", 69.0599709, 24.1665922, 55.3367024, 10.9631865)
+	cacheGeo("germany", 55.0581235, 15.0418962, 47.2701114, 5.8663425)
+	cacheGeo("poland", 54.835784, 24.1458933, 49.0020251, 14.1228641)
+	cacheGeo("russia", 81.858122, -169.0456324, 41.1853529, 19.6404268)
+	cacheGeo("algeria", 37.0898204, 11.999999, 18.968147, -8.667611299999999)
+	cacheGeo("congo", 3.707791, 18.6436109, -5.0289719, 11.1530037)
+	cacheGeo("china", 53.5587015, 134.7728098, 18.1576156, 73.4994136)
+	cacheGeo("india", 35.5087008, 97.395561, 6.7535159, 68.1623859)
+	cacheGeo("australia", -9.2198214, 159.2557541, -54.7772185, 112.9215625)
+	cacheGeo("mexico", 32.7187629, -86.7105711, 14.5345486, -118.3649292)
+	cacheGeo("brazil", 5.2717863, -29.3448224, -33.7506241, -73.98281709999999)
+	cacheGeo("argentina", -21.7810459, -53.6374811, -55.05727899999999, -73.56036019999999)
+
+	geocode.AltLookupFn = func(ctx context.Context, addr string) ([]geocode.Rect, error) {
+		r, ok := altLocCache[addr]
+		if ok {
+			return r, nil
+		}
+		return nil, nil
+	}
+}
+
+var exifFileContent struct {
+	once sync.Once
+	jpeg []byte
+}
+
+// exifFileContentLatLong returns the contents of a
+// jpeg/exif file with the GPS coordinates lat and long.
+func exifFileContentLatLong(lat, long float64) string {
+	exifFileContent.once.Do(func() {
+		var buf bytes.Buffer
+		jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 128, 128)), nil)
+		exifFileContent.jpeg = buf.Bytes()
+	})
+
+	x := rawExifLatLong(lat, long)
+	j := exifFileContent.jpeg
+
+	app1sec := []byte{0xff, 0xe1, 0, 0}
+	binary.BigEndian.PutUint16(app1sec[2:], uint16(len(x)+2))
+
+	p := make([]byte, 0, len(j)+len(app1sec)+len(x))
+	p = append(p, j[:2]...)   // ff d8
+	p = append(p, app1sec...) // exif section header
+	p = append(p, x...)       // raw exif
+	p = append(p, j[2:]...)   // jpeg image
+
+	return string(p)
+}
+
+// rawExifLatLong creates raw exif for lat/long
+// for storage in a jpeg file.
+func rawExifLatLong(lat, long float64) []byte {
+
+	x := exifBuf{
+		bo: binary.BigEndian,
+		p:  []byte("MM"),
+	}
+
+	x.putUint16(42) // magic
+
+	ifd0ofs := x.reservePtr() // room for ifd0 offset
+	x.storePtr(ifd0ofs)
+
+	const (
+		gpsSubIfdTag = 0x8825
+
+		gpsLatitudeRef  = 1
+		gpsLatitude     = 2
+		gpsLongitudeRef = 3
+		gpsLongitude    = 4
+
+		typeAscii    = 2
+		typeLong     = 4
+		typeRational = 5
+	)
+
+	// IFD0
+	x.storePtr(ifd0ofs)
+	x.putUint16(1) // 1 tag
+
+	x.putTag(gpsSubIfdTag, typeLong, 1)
+	gpsofs := x.reservePtr()
+
+	// IFD1
+	x.putUint32(0) // no IFD1
+
+	// GPS sub-IFD
+	x.storePtr(gpsofs)
+	x.putUint16(4) // 4 tags
+
+	x.putTag(gpsLatitudeRef, typeAscii, 2)
+	if lat >= 0 {
+		x.next(4)[0] = 'N'
+	} else {
+		x.next(4)[0] = 'S'
+	}
+
+	x.putTag(gpsLatitude, typeRational, 3)
+	latptr := x.reservePtr()
+
+	x.putTag(gpsLongitudeRef, typeAscii, 2)
+	if long >= 0 {
+		x.next(4)[0] = 'E'
+	} else {
+		x.next(4)[0] = 'W'
+	}
+
+	x.putTag(gpsLongitude, typeRational, 3)
+	longptr := x.reservePtr()
+
+	// write data referenced in GPS sub-IFD
+	x.storePtr(latptr)
+	x.putDegMinSecRat(lat)
+
+	x.storePtr(longptr)
+	x.putDegMinSecRat(long)
+
+	return append([]byte("Exif\x00\x00"), x.p...)
+}
+
+type exifBuf struct {
+	bo binary.ByteOrder
+	p  []byte
+}
+
+func (x *exifBuf) next(n int) []byte {
+	l := len(x.p)
+	x.p = append(x.p, make([]byte, n)...)
+	return x.p[l:]
+}
+
+func (x *exifBuf) putTag(tag, typ uint16, len uint32) {
+	x.putUint16(tag)
+	x.putUint16(typ)
+	x.putUint32(len)
+}
+
+func (x *exifBuf) putUint16(n uint16) { x.bo.PutUint16(x.next(2), n) }
+func (x *exifBuf) putUint32(n uint32) { x.bo.PutUint32(x.next(4), n) }
+
+func (x *exifBuf) putDegMinSecRat(v float64) {
+	if v < 0 {
+		v = -v
+	}
+	deg := uint32(v)
+	v = 60 * (v - float64(deg))
+	min := uint32(v)
+	v = 60 * (v - float64(min))
+	μsec := uint32(v * 1e6)
+
+	x.putUint32(deg)
+	x.putUint32(1)
+	x.putUint32(min)
+	x.putUint32(1)
+	x.putUint32(μsec)
+	x.putUint32(1e6)
+}
+
+// reservePtr reserves room for a ptr in x.
+func (x *exifBuf) reservePtr() int {
+	l := len(x.p)
+	x.next(4)
+	return l
+}
+
+// storePtr stores the current write offset at p
+// that have been reserved with reservePtr.
+func (x *exifBuf) storePtr(p int) {
+	x.bo.PutUint32(x.p[p:], uint32(len(x.p)))
 }

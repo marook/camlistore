@@ -501,7 +501,18 @@ type LocationConstraint struct {
 }
 
 func (c *LocationConstraint) matchesLatLong(lat, long float64) bool {
-	return c.Any || (c.West <= long && long <= c.East && c.South <= lat && lat <= c.North)
+	if c.Any {
+		return true
+	}
+	if !(c.South <= lat && lat <= c.North) {
+		return false
+	}
+	if c.West < c.East {
+		return c.West <= long && long <= c.East
+	} else {
+		// boundary spanning latitude ±180°
+		return c.West <= long || long <= c.East
+	}
 }
 
 // A StringConstraint specifies constraints on a string.
@@ -1392,11 +1403,14 @@ func (c *PermanodeConstraint) blobMatches(ctx context.Context, s *search, br blo
 	}
 
 	if c.Location != nil {
-		if corpus == nil {
+		l, err := s.h.lh.PermanodeLocation(ctx, br, c.At, s.h.owner)
+		if err != nil {
+			if err != os.ErrNotExist {
+				log.Printf("PermanodeLocation(ref %s): %v", br, err)
+			}
 			return false, nil
 		}
-		lat, long, ok := corpus.PermanodeLatLong(br, c.At)
-		if !ok || !c.Location.matchesLatLong(lat, long) {
+		if !c.Location.matchesLatLong(l.Latitude, l.Longitude) {
 			return false, nil
 		}
 	}
@@ -1578,9 +1592,7 @@ func (c *FileConstraint) blobMatches(ctx context.Context, s *search, br blob.Ref
 			return false, nil
 		}
 		lat, long, ok := corpus.FileLatLong(br)
-		if ok && c.Location.Any {
-			// Pass.
-		} else if !ok || !c.Location.matchesLatLong(lat, long) {
+		if !ok || !c.Location.matchesLatLong(lat, long) {
 			return false, nil
 		}
 	}
