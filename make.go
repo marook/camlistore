@@ -814,7 +814,7 @@ func getVersion() string {
 	return gitVersion()
 }
 
-var gitVersionRx = regexp.MustCompile(`\b\d\d\d\d-\d\d-\d\d-[0-9a-f]{7,7}\b`)
+var gitVersionRx = regexp.MustCompile(`\b\d\d\d\d-\d\d-\d\d-[0-9a-f]{7,8}\b`)
 
 // gitVersion returns the git version of the git repo at camRoot as a
 // string of the form "yyyy-mm-dd-xxxxxxx", with an optional trailing
