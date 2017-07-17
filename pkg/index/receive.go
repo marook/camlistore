@@ -50,70 +50,6 @@ import (
 	"golang.org/x/net/context"
 )
 
-// outOfOrderIndexerLoop asynchronously reindexes blobs received
-// out of order. It panics if started more than once or if the
-// index has no blobSource.
-func (ix *Index) outOfOrderIndexerLoop() {
-	showReindexRace := os.Getenv("CAMLI_SHOW_REINDEX_RACE") != ""
-	ix.mu.RLock()
-	if ix.oooRunning {
-		panic("outOfOrderIndexerLoop is already running")
-	}
-	if ix.blobSource == nil {
-		panic("index has no blobSource")
-	}
-	ix.oooRunning = true
-	ix.mu.RUnlock()
-WaitTickle:
-	for range ix.tickleOoo {
-		if showReindexRace {
-			// not strictly needed, but greatly increases the probability of seeing the race.
-			time.Sleep(1 * time.Second)
-		}
-		for {
-			ix.Lock()
-			if len(ix.readyReindex) == 0 {
-				ix.Unlock()
-				continue WaitTickle
-			}
-			var br blob.Ref
-			for br = range ix.readyReindex {
-				break
-			}
-			delete(ix.readyReindex, br)
-			ix.Unlock()
-
-			err := ix.indexBlob(br)
-			if err != nil {
-				log.Printf("out-of-order indexBlob(%v) = %v", br, err)
-				ix.Lock()
-				if len(ix.needs[br]) == 0 {
-					ix.readyReindex[br] = true
-				}
-				ix.Unlock()
-			}
-		}
-	}
-}
-
-func (ix *Index) indexBlob(br blob.Ref) error {
-	ix.RLock()
-	bs := ix.blobSource
-	ix.RUnlock()
-	if bs == nil {
-		panic(fmt.Sprintf("index: can't re-index %v: no blobSource", br))
-	}
-	rc, _, err := bs.Fetch(br)
-	if err != nil {
-		return fmt.Errorf("index: failed to fetch %v for reindexing: %v", br, err)
-	}
-	defer rc.Close()
-	if _, err := blobserver.Receive(ix, br, rc); err != nil {
-		return err
-	}
-	return nil
-}
-
 type mutationMap struct {
 	kv map[string]string // the keys and values we populate
 
@@ -155,16 +91,74 @@ func blobsFilteringOut(v []blob.Ref, x blob.Ref) []blob.Ref {
 	return nl
 }
 
+func (ix *Index) indexBlob(br blob.Ref) error {
+	rc, _, err := ix.blobSource.Fetch(br)
+	if err != nil {
+		return fmt.Errorf("index: failed to fetch %v for reindexing: %v", br, err)
+	}
+	defer rc.Close()
+	if _, err := blobserver.Receive(ix, br, rc); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DisableOutOfOrderIndexing should only be used for tests. It disables the
+// asynchronous, out of order, indexing to demonstrate that e.g. reindexing fails
+// without it.
+func (ix *Index) DisableOutOfOrderIndexing() {
+	ix.Lock()
+	defer ix.Unlock()
+	ix.oooDisabled = true
+}
+
+// indexReadyBlobs indexes blobs that have been recently marked as ready to be
+// reindexed, after the blobs they depend on eventually were indexed.
+func (ix *Index) indexReadyBlobs() {
+	defer ix.reindexWg.Done()
+	ix.RLock()
+	// For tests
+	if ix.oooDisabled {
+		ix.RUnlock()
+		return
+	}
+	ix.RUnlock()
+	failed := make(map[blob.Ref]bool)
+	for {
+		ix.Lock()
+		if len(ix.readyReindex) == 0 {
+			ix.Unlock()
+			return
+		}
+		var br blob.Ref
+		for br = range ix.readyReindex {
+			break
+		}
+		delete(ix.readyReindex, br)
+		ix.Unlock()
+		if err := ix.indexBlob(br); err != nil {
+			log.Printf("out-of-order indexBlob(%v) = %v", br, err)
+			failed[br] = true
+		}
+	}
+	ix.Lock()
+	defer ix.Unlock()
+	for br, _ := range failed {
+		ix.readyReindex[br] = true
+	}
+}
+
+// noteBlobIndexed checks if the recent indexing of br now allows the blobs that
+// were depending on br, to be indexed in turn. If yes, they're reindexed
+// asynchronously by indexReadyBlobs.
 func (ix *Index) noteBlobIndexed(br blob.Ref) {
 	for _, needer := range ix.neededBy[br] {
 		newNeeds := blobsFilteringOut(ix.needs[needer], br)
 		if len(newNeeds) == 0 {
 			ix.readyReindex[needer] = true
 			delete(ix.needs, needer)
-			select {
-			case ix.tickleOoo <- true:
-			default:
-			}
+			ix.reindexWg.Add(1)
+			go ix.indexReadyBlobs()
 		} else {
 			ix.needs[needer] = newNeeds
 		}
@@ -370,9 +364,42 @@ func (f *missTrackFetcher) Fetch(br blob.Ref) (blob io.ReadCloser, size uint32, 
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.missing = append(f.missing, br)
-		err = errMissingDep
 	}
 	return
+}
+
+// trackErrorsFetcher is a blob.Fetcher that records to errs all Fetch errors.
+type trackErrorsFetcher struct {
+	mu   sync.RWMutex
+	errs []error
+
+	f blob.Fetcher
+}
+
+func (tf *trackErrorsFetcher) Fetch(br blob.Ref) (blob io.ReadCloser, size uint32, err error) {
+	blob, size, err = tf.f.Fetch(br)
+	if err != nil {
+		tf.mu.Lock()
+		defer tf.mu.Unlock()
+		tf.errs = append(tf.errs, err)
+	}
+	return
+}
+
+// hasErrNotExist reports whether tf recorded any error and if all of them are
+// os.ErrNotExist errors.
+func (tf *trackErrorsFetcher) hasErrNotExist() bool {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	if len(tf.errs) == 0 {
+		return false
+	}
+	for _, v := range tf.errs {
+		if v != os.ErrNotExist {
+			return false
+		}
+	}
+	return true
 }
 
 // filePrefixReader is both a *bytes.Reader and a *schema.FileReader for use in readPrefixOrFile
@@ -406,7 +433,8 @@ func (ix *Index) populateFile(fetcher blob.Fetcher, b *schema.Blob, mm *mutation
 	times = append(times, b.ModTime())
 
 	blobRef := b.BlobRef()
-	fr, err := b.NewFileReader(fetcher)
+	tf := &trackErrorsFetcher{f: fetcher.(*missTrackFetcher)}
+	fr, err := b.NewFileReader(tf)
 	if err != nil {
 		return err
 	}
@@ -425,6 +453,9 @@ func (ix *Index) populateFile(fetcher blob.Fetcher, b *schema.Blob, mm *mutation
 	}
 	size, err := io.Copy(copyDest, mr)
 	if err != nil {
+		if tf.hasErrNotExist() {
+			return errMissingDep
+		}
 		return err
 	}
 	wholeRef := blob.RefFromHash(sha1)
@@ -604,6 +635,10 @@ func indexEXIF(wholeRef blob.Ref, r io.Reader, mm *mutationMap) (err error) {
 			log.Printf("Long, lat outside allowed range: %v, %v", long, lat)
 			return nil
 		}
+		if math.IsNaN(long) || math.IsNaN(lat) {
+			log.Print("Latitude or Longitude is NaN")
+			return nil
+		}
 		// index 7 places fixed precision (~10mm worst case at equator)
 		// http://stackoverflow.com/a/1947615/114581
 		mm.Set(keyEXIFGPS.Key(wholeRef), keyEXIFGPS.Val(fmt.Sprintf("%.7f", lat), fmt.Sprintf("%.7f", long)))
@@ -689,7 +724,8 @@ func (ix *Index) populateDir(fetcher blob.Fetcher, b *schema.Blob, mm *mutationM
 	// TODO(bradfitz): move the NewDirReader and FileName method off *schema.Blob and onto
 	// StaticFile/StaticDirectory or something.
 
-	dr, err := b.NewDirReader(fetcher)
+	tf := &trackErrorsFetcher{f: fetcher.(*missTrackFetcher)}
+	dr, err := b.NewDirReader(tf)
 	if err != nil {
 		// TODO(bradfitz): propagate up a transient failure
 		// error type, so we can retry indexing files in the
@@ -699,6 +735,9 @@ func (ix *Index) populateDir(fetcher blob.Fetcher, b *schema.Blob, mm *mutationM
 	}
 	sts, err := dr.StaticSet()
 	if err != nil {
+		if tf.hasErrNotExist() {
+			return errMissingDep
+		}
 		log.Printf("index: error indexing directory: can't get StaticSet: %v\n", err)
 		return nil
 	}
@@ -760,11 +799,15 @@ func (ix *Index) populateClaim(ctx context.Context, fetcher *missTrackFetcher, b
 		return nil
 	}
 
-	vr := jsonsign.NewVerificationRequest(b.JSON(), blob.NewSerialFetcher(ix.KeyFetcher, fetcher))
+	tf := &trackErrorsFetcher{f: fetcher}
+	vr := jsonsign.NewVerificationRequest(b.JSON(), blob.NewSerialFetcher(ix.KeyFetcher, tf))
 	if !vr.Verify() {
 		// TODO(bradfitz): ask if the vr.Err.(jsonsign.Error).IsPermanent() and retry
 		// later if it's not permanent? or maybe do this up a level?
 		if vr.Err != nil {
+			if tf.hasErrNotExist() {
+				return errMissingDep
+			}
 			return vr.Err
 		}
 		return errors.New("index: populateClaim verification failure")

@@ -65,6 +65,7 @@ var (
 	stampVersion   = flag.Bool("stampversion", true, "Stamp version into buildinfo.GitInfo")
 	website        = flag.Bool("website", false, "Just build the website.")
 	camnetdns      = flag.Bool("camnetdns", false, "Just build camlistore.org/server/camnetdns.")
+	static         = flag.Bool("static", false, "Build a static binary, so it can run in an empty container.")
 
 	// Use GOPATH from the environment and work from there. Do not create a temporary source tree with a new GOPATH in it.
 	// It is set through CAMLI_MAKE_USEGOPATH for integration tests that call 'go run make.go', and which are already in
@@ -80,14 +81,15 @@ var (
 	// Our temporary source tree root and build dir, i.e: buildGoPath + "src/camlistore.org"
 	buildSrcDir string
 	// files mirrored from camRoot to buildSrcDir
-	rxMirrored = regexp.MustCompile(`^([a-zA-Z0-9\-\_]+\.(?:blobs|camli|css|eot|err|gif|go|s|pb\.go|gpg|html|ico|jpg|js|json|xml|min\.css|min\.js|mp3|otf|png|svg|pdf|psd|tiff|ttf|woff|xcf|tar\.gz|gz|tar\.xz|tbz2|zip|sh))$`)
+	rxMirrored = regexp.MustCompile(`^([a-zA-Z0-9\-\_\.]+\.(?:blobs|camli|css|eot|err|gif|go|s|pb\.go|gpg|html|ico|jpg|js|json|xml|min\.css|min\.js|mp3|otf|png|svg|pdf|psd|tiff|ttf|woff|xcf|tar\.gz|gz|tar\.xz|tbz2|zip|sh))$`)
 	// base file exceptions for the above matching, so as not to complicate the regexp any further
 	mirrorIgnored = map[string]bool{
 		"publisher.js": true, // because this file is (re)generated after the mirroring
+		"goui.js":      true, // because this file is (re)generated after the mirroring
 	}
 	// gopherjsGoroot should be specified through the env var
 	// CAMLI_GOPHERJS_GOROOT when the user's using go tip, because gopherjs only
-	// builds with Go 1.7.
+	// builds with Go 1.8.
 	gopherjsGoroot string
 )
 
@@ -104,6 +106,8 @@ func main() {
 	if *website && *camnetdns {
 		log.Fatal("-camnetdns and -website are mutually exclusive")
 	}
+
+	gopherjsGoroot = os.Getenv("CAMLI_GOPHERJS_GOROOT")
 
 	verifyGoVersion()
 
@@ -170,6 +174,8 @@ func main() {
 		"camlistore.org/server/camlistored",
 		"camlistore.org/app/hello",
 		"camlistore.org/app/publisher",
+		"camlistore.org/app/scanningcabinet",
+		"camlistore.org/app/scanningcabinet/scancab",
 	}
 	switch *targets {
 	case "*":
@@ -184,7 +190,7 @@ func main() {
 		if *website {
 			log.Fatal("-targets and -website are mutually exclusive")
 		}
-		if *website {
+		if *camnetdns {
 			log.Fatal("-targets and -camnetdns are mutually exclusive")
 		}
 		if t := strings.Split(*targets, ","); len(t) != 0 {
@@ -202,6 +208,7 @@ func main() {
 
 	withCamlistored := stringListContains(targs, "camlistore.org/server/camlistored")
 
+	// TODO(mpl): no need to build publisher.js if we're not building the publisher app.
 	if withCamlistored {
 		// gopherjs has to run before doEmbed since we need all the javascript
 		// to be generated before embedding happens.
@@ -219,6 +226,9 @@ func main() {
 	}
 
 	tags := []string{"purego"} // for cznic/zappy
+	if *static {
+		tags = append(tags, "netgo")
+	}
 	if sql {
 		tags = append(tags, "with_sqlite")
 	}
@@ -233,8 +243,14 @@ func main() {
 		log.Printf("version to stamp is %q", version)
 	}
 	var ldFlags string
+	if *static {
+		ldFlags = "-w -d -linkmode internal"
+	}
 	if *stampVersion {
-		ldFlags = "-X \"camlistore.org/pkg/buildinfo.GitInfo=" + version + "\""
+		if ldFlags != "" {
+			ldFlags += " "
+		}
+		ldFlags += "-X \"camlistore.org/pkg/buildinfo.GitInfo=" + version + "\""
 	}
 	baseArgs = append(baseArgs, "--ldflags="+ldFlags, "--tags="+strings.Join(tags, " "))
 
@@ -255,6 +271,9 @@ func main() {
 	cmd.Env = append(cleanGoEnv(),
 		"GOPATH="+buildGoPath,
 	)
+	if *static {
+		cmd.Env = append(cmd.Env, "CGO_ENABLED=0")
+	}
 
 	if *verbose {
 		log.Printf("Running go %q with Env %q", args, cmd.Env)
@@ -308,6 +327,7 @@ func baseDirName(sql bool) string {
 
 const (
 	publisherJS = "app/publisher/publisher.js"
+	gopherjsUI  = "server/camlistored/ui/goui.js"
 )
 
 // buildGopherjs builds the gopherjs binary from our vendored gopherjs source.
@@ -451,12 +471,19 @@ func genPublisherJS(gopherjsBin string) error {
 	// modtime of the existing gopherjs.js if there was no reason to.
 	output := filepath.Join(buildSrcDir, filepath.FromSlash(publisherJS))
 	tmpOutput := output + ".new"
-	// TODO(mpl): maybe not with -m when building for devcam.
-	args := []string{"build", "--tags", "nocgo", "-m", "-o", tmpOutput, "camlistore.org/app/publisher/js"}
+	args := []string{"build", "--tags", "nocgo"}
+	if *embedResources {
+		// when embedding for "production", use -m to minify the javascript output
+		args = append(args, "-m")
+	}
+	args = append(args, "-o", tmpOutput, "camlistore.org/app/publisher/js")
 	cmd := exec.Command(gopherjsBin, args...)
 	cmd.Env = append(cleanGoEnv(),
 		"GOPATH="+buildGoPath,
 	)
+	// Pretend we're on linux regardless of the actual host, because recommended
+	// hack to work around https://github.com/gopherjs/gopherjs/issues/511
+	cmd.Env = setEnv(cmd.Env, "GOOS", "linux")
 	if gopherjsGoroot != "" {
 		cmd.Env = setEnv(cmd.Env, "GOROOT", gopherjsGoroot)
 	}
@@ -514,6 +541,83 @@ func genPublisherJS(gopherjsBin string) error {
 	return nil
 }
 
+// TODO(mpl): refactor genWebUIJS with genPublisherJS
+
+// genWebUIJS runs the gopherjs command, using the gopherjsBin binary, on
+// camlistore.org/server/camlistored/ui/goui, to generate the javascript
+// code at camlistore.org/server/camlistored/ui/goui.js
+func genWebUIJS(gopherjsBin string) error {
+	// Run gopherjs on a temporary output file, so we don't change the
+	// modtime of the existing goui.js if there was no reason to.
+	output := filepath.Join(buildSrcDir, filepath.FromSlash(gopherjsUI))
+	tmpOutput := output + ".new"
+	args := []string{"build", "--tags", "nocgo"}
+	if *embedResources {
+		// when embedding for "production", use -m to minify the javascript output
+		args = append(args, "-m")
+	}
+	args = append(args, "-o", tmpOutput, "camlistore.org/server/camlistored/ui/goui")
+	cmd := exec.Command(gopherjsBin, args...)
+	cmd.Env = append(cleanGoEnv(),
+		"GOPATH="+buildGoPath,
+	)
+	// Pretend we're on linux regardless of the actual host, because recommended
+	// hack to work around https://github.com/gopherjs/gopherjs/issues/511
+	cmd.Env = setEnv(cmd.Env, "GOOS", "linux")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gopherjs for web UI error: %v, %v", err, string(out))
+	}
+
+	// check if new output is different from previous run result
+	_, err := os.Stat(output)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	needsUpdate := true
+	if err == nil {
+		if hashsum(tmpOutput) == hashsum(output) {
+			needsUpdate = false
+		}
+	}
+	if needsUpdate {
+		// general case: replace previous run result with new output
+		if err := os.Rename(tmpOutput, output); err != nil {
+			return err
+		}
+		log.Printf("gopherjs for web UI generated %v", output)
+	}
+	// And since we're generating after the mirroring, we need to manually
+	// add the output to the wanted files
+	wantDestFile[output] = true
+	wantDestFile[output+".map"] = true
+
+	// Finally, even when embedding resources, we copy the output back to
+	// camRoot. It's a bit unsatisfactory that we have to modify things out of
+	// buildGoPath but it's better than the alternative (the user ending up
+	// without a copy of publisher.js in their camRoot).
+	jsInCamRoot := filepath.Join(camRoot, filepath.FromSlash(gopherjsUI))
+	if !needsUpdate {
+		_, err := os.Stat(jsInCamRoot)
+		if err == nil {
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
+	}
+	data, err := ioutil.ReadFile(output)
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(
+		jsInCamRoot,
+		data, 0600); err != nil {
+		return err
+	}
+	log.Printf("Copied gopherjs generated code for web UI to  %v", jsInCamRoot)
+	return nil
+}
+
 // noGopherJS creates a fake (unusable) gopherjs.js file for when we want to skip all of
 // the gopherjs business.
 func noGopherJS(output string) {
@@ -539,6 +643,7 @@ func hashsum(filename string) string {
 }
 
 // makeGopherjs builds and runs the gopherjs command on camlistore.org/app/publisher/js
+// and camlistore.org/server/camlistored/ui/goui
 // When CAMLI_MAKE_USEGOPATH is set (for integration tests through devcam), we
 // generate a fake file instead.
 func makeGopherjs() error {
@@ -559,7 +664,9 @@ func makeGopherjs() error {
 	if err := genPublisherJS(gopherjs); err != nil {
 		return err
 	}
-
+	if err := genWebUIJS(gopherjs); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -734,7 +841,7 @@ func genEmbeds() error {
 	if runtime.GOOS == "windows" {
 		cmdName += ".exe"
 	}
-	for _, embeds := range []string{"server/camlistored/ui", "pkg/server", "vendor/embed/react", "vendor/embed/less", "vendor/embed/glitch", "vendor/embed/fontawesome", "app/publisher"} {
+	for _, embeds := range []string{"server/camlistored/ui", "pkg/server", "vendor/embed/react", "vendor/embed/less", "vendor/embed/glitch", "vendor/embed/fontawesome", "vendor/embed/leaflet", "app/publisher", "app/scanningcabinet/ui"} {
 		embeds := buildSrcPath(embeds)
 		args := []string{"--output-files-stderr", embeds}
 		cmd := exec.Command(cmdName, args...)
@@ -814,13 +921,14 @@ func getVersion() string {
 	return gitVersion()
 }
 
-var gitVersionRx = regexp.MustCompile(`\b\d\d\d\d-\d\d-\d\d-[0-9a-f]{7,7}\b`)
+var gitVersionRx = regexp.MustCompile(`\b\d\d\d\d-\d\d-\d\d-[0-9a-f]{10,10}\b`)
 
 // gitVersion returns the git version of the git repo at camRoot as a
 // string of the form "yyyy-mm-dd-xxxxxxx", with an optional trailing
 // '+' if there are any local uncomitted modifications to the tree.
 func gitVersion() string {
-	cmd := exec.Command("git", "rev-list", "--max-count=1", "--pretty=format:'%ad-%h'", "--date=short", "HEAD")
+	cmd := exec.Command("git", "rev-list", "--max-count=1", "--pretty=format:'%ad-%h'",
+		"--date=short", "--abbrev=10", "HEAD")
 	cmd.Dir = camRoot
 	out, err := cmd.Output()
 	if err != nil {
@@ -848,7 +956,10 @@ func verifyCamlistoreRoot(dir string) {
 	}
 }
 
-const goVersionMinor = '7'
+const (
+	goVersionMinor  = '8'
+	gopherJSGoMinor = '8'
+)
 
 func verifyGoVersion() {
 	_, err := exec.LookPath("go")
@@ -874,24 +985,26 @@ func verifyGoVersion() {
 	}
 	minorChar := strings.TrimPrefix(version, "go1.")[0]
 	if minorChar >= goVersionMinor && minorChar <= '9' {
+		if minorChar != gopherJSGoMinor {
+			verifyGopherjsGoroot()
+		}
 		return
 	}
 	log.Fatalf("Your version of Go (%s) is too old. Camlistore requires Go 1.%c or later.", version, goVersionMinor)
 }
 
 func verifyGopherjsGoroot() {
-	gopherjsGoroot = os.Getenv("CAMLI_GOPHERJS_GOROOT")
 	goBin := filepath.Join(gopherjsGoroot, "bin", "go")
 	if gopherjsGoroot == "" {
-		gopherjsGoroot = filepath.Join(homeDir(), fmt.Sprintf("go1.%c", goVersionMinor))
+		gopherjsGoroot = filepath.Join(homeDir(), fmt.Sprintf("go1.%c", gopherJSGoMinor))
 		goBin = filepath.Join(gopherjsGoroot, "bin", "go")
-		log.Printf("You're using go tip, and CAMLI_GOPHERJS_GOROOT was not provided, so defaulting to %v for building gopherjs instead.", goBin)
+		log.Printf("You're using go != 1.%c, and CAMLI_GOPHERJS_GOROOT was not provided, so defaulting to %v for building gopherjs instead.", gopherJSGoMinor, goBin)
 	}
 	if _, err := os.Stat(goBin); err != nil {
 		if !os.IsNotExist(err) {
 			log.Fatal(err)
 		}
-		log.Fatalf("%v not found. You need to specify a go1.%c root in CAMLI_GOPHERJS_GOROOT for building gopherjs", goBin, goVersionMinor)
+		log.Fatalf("%v not found. You need to specify a go1.%c root in CAMLI_GOPHERJS_GOROOT for building gopherjs", goBin, gopherJSGoMinor)
 	}
 }
 

@@ -1,12 +1,10 @@
 # Configuring the server
 
 The server's config file at $HOME/.config/camlistore/server-config.json is
-JSON. It can either be in simple mode (for basic configurations), or in
-low-level mode (for any sort of crazy configuration).
+JSON. It can either be in [simple mode](#simplemode) (for basic configurations), or in
+[low-level mode](#lowlevel) (for any sort of crazy configuration).
 
-This page documents the simple configuration mode.
-
-# Configuration Keys & Values
+# Configuration Keys & Values {#simplemode}
 
 **Note,** if you can't find what you're looking for here, check the API docs: [/pkg/types/serverconfig](https://camlistore.org/pkg/types/serverconfig/).
 
@@ -41,6 +39,18 @@ This page documents the simple configuration mode.
      * Camlistore listens on port `443` in order to answer the TLS-SNI challenge
        from Let's Encrypt.
   * As a fallback, if no FQDN is found, a self-signed certificate is generated.
+
+* `camliNetIP`: the optional internet-facing IP address for this
+  Camlistore instance. If set, a name in the camlistore.net domain for
+  that IP address will be requested on startup. The obtained domain name
+  will then be used as the host name in the base URL.
+  For now, the protocol to get the name requires receiving a challenge
+  on port 443. Also, this option implies `https`, and that the HTTPS
+  certificate is obtained from [Let's Encrypt](https://letsencrypt.org).
+  For these reasons, this option is mutually exclusive with `baseURL`, `listen`,
+  `httpsCert`, and `httpsKey`.
+  On cloud instances (Google Compute Engine only for now), this option is
+  automatically used.
 
 * `identity`: your GPG fingerprint. A keypair is created for new users on
   start, but this may be changed if you know what you're doing.
@@ -98,6 +108,7 @@ same as the order they are listed above.
 Others aren't yet supported by the simple config mode. Patches to
 [pkg/serverinit](https://camlistore.org/pkg/serverinit/genconfig.go) welcome.
 
+Examples for [configuring storage backends](/doc/storage-examples.md)
 
 ## Indexing options {#indexing}
 
@@ -142,7 +153,8 @@ One can create any permanode with camput or the UI, and set its camliRoot
 attribute to the value set in the config, to use it as the root permanode for
 publishing.
 
-Please see the [publishing README](/doc/publishing/README) if you want to
+Please see the [publishing README](/doc/publishing/README) for further details
+on how to set up permanodes for publishing, or if you want to
 make/contribute more publishing views.
 
 
@@ -210,3 +222,59 @@ Alternatively, you can run `devcam appengine` once, which will create and
 populate the default directory (`server/appengine/source_root`). Please see the
 [CONTRIBUTING](https://camlistore.googlesource.com/camlistore/+/master/CONTRIBUTING.md)
 doc to build devcam.
+
+# Low-level configuration {#lowlevel}
+
+You can specify a low-level configuration file to camlistored with the same
+`-configfile` option that is used to specify the simple mode configuration file.
+Camlistore tests for the presence of the `"handlerConfig": true` key/value
+pair to determine whether the configuration should be considered low-level.
+
+As the low-level configuration needs to be much more detailed and precise, it is
+not advised to write one from scratch. Therefore, the easiest way to get started
+is to first run Camlistore with a simple configuration (or none, as one will be
+automatically generated), and to download the equivalent low-level configuration
+that can be found at /debug/config on your Camlistore instance.
+
+In the following are examples of features that can only be achieved through
+low-level configuration, for now.
+
+## Replication to another Camlistore instance {#replication}
+
+If `"/bs"` is the storage for your primary instance, such as for example:
+
+        "/bs/": {
+            "handler": "storage-blobpacked",
+            "handlerArgs": {
+                "largeBlobs": "/bs-packed/",
+                "metaIndex": {
+                    "file": "/home/you/var/camlistore/blobs/packed/packindex.leveldb",
+                    "type": "leveldb"
+                },
+                "smallBlobs": "/bs-loose/"
+            }
+        },
+
+then instead of `"/bs"`, you can use everywhere else instead in the config the
+prefix `"/bsrepl/"`, which can be defined as:
+
+        "/bsrepl/": {
+            "handler": "storage-replica",
+            "handlerArgs": {
+                "backends": [
+                    "/bs/",
+                    "/r1/"
+                ]
+            }
+        },
+
+where `"/r1/"` is the blobserver for your other Camlistore instance, such as:
+
+		"/r1/": {
+			"handler": "storage-remote",
+			"handlerArgs": {
+				"url": "https://example.com:3179",
+				"auth": "userpass:foo:bar",
+				"skipStartupCheck": false
+			}
+		},

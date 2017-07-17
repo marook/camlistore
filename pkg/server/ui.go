@@ -31,11 +31,13 @@ import (
 
 	fontawesomestatic "embed/fontawesome"
 	glitchstatic "embed/glitch"
+	leafletstatic "embed/leaflet"
 	lessstatic "embed/less"
 	reactstatic "embed/react"
 
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/blobserver"
+	"camlistore.org/pkg/cacher"
 	"camlistore.org/pkg/constants"
 	"camlistore.org/pkg/fileembed"
 	"camlistore.org/pkg/httputil"
@@ -53,20 +55,14 @@ import (
 )
 
 var (
-	staticFilePattern = regexp.MustCompile(`^([a-zA-Z0-9\-\_\.]+\.(html|js|css|png|jpg|gif|svg))$`)
-	identOrDotPattern = regexp.MustCompile(`^[a-zA-Z\_]+(\.[a-zA-Z\_]+)*$`)
-
-	// Download URL suffix:
-	//   $1: blobref (checked in download handler)
-	//   $2: optional "/filename" to be sent as recommended download name,
-	//       if sane looking
-	downloadPattern = regexp.MustCompile(`^download/([^/]+)(/.*)?$`)
-
+	staticFilePattern  = regexp.MustCompile(`^([a-zA-Z0-9\-\_\.]+\.(html|js|css|png|jpg|gif|svg))$`)
+	identOrDotPattern  = regexp.MustCompile(`^[a-zA-Z\_]+(\.[a-zA-Z\_]+)*$`)
 	thumbnailPattern   = regexp.MustCompile(`^thumbnail/([^/]+)(/.*)?$`)
 	treePattern        = regexp.MustCompile(`^tree/([^/]+)(/.*)?$`)
 	closurePattern     = regexp.MustCompile(`^closure/(([^/]+)(/.*)?)$`)
 	lessPattern        = regexp.MustCompile(`^less/(.+)$`)
 	reactPattern       = regexp.MustCompile(`^react/(.+)$`)
+	leafletPattern     = regexp.MustCompile(`^leaflet/(.+)$`)
 	fontawesomePattern = regexp.MustCompile(`^fontawesome/(.+)$`)
 	glitchPattern      = regexp.MustCompile(`^glitch/(.+)$`)
 
@@ -102,6 +98,7 @@ type UIHandler struct {
 	closureHandler         http.Handler
 	fileLessHandler        http.Handler
 	fileReactHandler       http.Handler
+	fileLeafletHandler     http.Handler
 	fileFontawesomeHandler http.Handler
 	fileGlitchHandler      http.Handler
 }
@@ -116,7 +113,7 @@ func newKVOrNil(conf jsonconfig.Obj) (sorted.KeyValue, error) {
 	if len(conf) == 0 {
 		return nil, nil
 	}
-	return sorted.NewKeyValue(conf)
+	return sorted.NewKeyValueMaybeWipe(conf)
 }
 
 func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
@@ -194,9 +191,13 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 	}
 
 	if ui.sourceRoot != "" {
-		ui.fileReactHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "react"), "react.js")
+		ui.fileReactHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "react"), "react-dom.min.js")
 		if err != nil {
 			return nil, fmt.Errorf("Could not make react handler: %s", err)
+		}
+		ui.fileLeafletHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "leaflet"), "leaflet.js")
+		if err != nil {
+			return nil, fmt.Errorf("Could not make leaflet handler: %s", err)
 		}
 		ui.fileGlitchHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "glitch"), "npc_piggy__x1_walk_png_1354829432.png")
 		if err != nil {
@@ -431,6 +432,8 @@ func (ui *UIHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		ui.serveFromDiskOrStatic(rw, req, lessPattern, ui.fileLessHandler, lessstatic.Files)
 	case getSuffixMatches(req, reactPattern):
 		ui.serveFromDiskOrStatic(rw, req, reactPattern, ui.fileReactHandler, reactstatic.Files)
+	case getSuffixMatches(req, leafletPattern):
+		ui.serveFromDiskOrStatic(rw, req, leafletPattern, ui.fileLeafletHandler, leafletstatic.Files)
 	case getSuffixMatches(req, glitchPattern):
 		ui.serveFromDiskOrStatic(rw, req, glitchPattern, ui.fileGlitchHandler, glitchstatic.Files)
 	case getSuffixMatches(req, fontawesomePattern):
@@ -504,31 +507,20 @@ func (ui *UIHandler) discovery() *camtypes.UIDiscovery {
 	return uiDisco
 }
 
-func (ui *UIHandler) serveDownload(rw http.ResponseWriter, req *http.Request) {
+func (ui *UIHandler) serveDownload(w http.ResponseWriter, r *http.Request) {
 	if ui.root.Storage == nil {
-		http.Error(rw, "No BlobRoot configured", 500)
-		return
-	}
-
-	suffix := httputil.PathSuffix(req)
-	m := downloadPattern.FindStringSubmatch(suffix)
-	if m == nil {
-		httputil.ErrorRouting(rw, req)
-		return
-	}
-
-	fbr, ok := blob.Parse(m[1])
-	if !ok {
-		http.Error(rw, "Invalid blobref", 400)
+		http.Error(w, "No BlobRoot configured", 500)
 		return
 	}
 
 	dh := &DownloadHandler{
-		Fetcher: ui.root.Storage,
+		// TODO(mpl): for more efficiency, the cache itself should be a
+		// blobpacked, or really anything better optimized for file reading
+		// than a blobserver.localdisk (which is what ui.Cache most likely is).
+		Fetcher: cacher.NewCachingFetcher(ui.Cache, ui.root.Storage),
 		Search:  ui.search,
-		Cache:   ui.Cache,
 	}
-	dh.ServeHTTP(rw, req, fbr)
+	dh.ServeHTTP(w, r)
 }
 
 func (ui *UIHandler) serveThumbnail(rw http.ResponseWriter, req *http.Request) {
