@@ -114,6 +114,7 @@ func (sh *StatusHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 type status struct {
 	Version      string                   `json:"version"`
+	GoInfo       string                   `json:"goInfo"`
 	Errors       []camtypes.StatusError   `json:"errors,omitempty"`
 	Sync         map[string]syncStatus    `json:"sync"`
 	Storage      map[string]storageStatus `json:"storage"`
@@ -155,6 +156,7 @@ type storageStatus struct {
 func (sh *StatusHandler) currentStatus() *status {
 	res := &status{
 		Version: buildinfo.Version(),
+		GoInfo:  fmt.Sprintf("%s %s/%s cgo=%v", runtime.Version(), runtime.GOOS, runtime.GOARCH, cgoEnabled),
 		Storage: make(map[string]storageStatus),
 		Sync:    make(map[string]syncStatus),
 	}
@@ -259,7 +261,8 @@ func (sh *StatusHandler) serveStatusHTML(rw http.ResponseWriter, req *http.Reque
 	f("<h2>Admin</h2>")
 	f("<ul>")
 	f("  <li><form method='post' action='restart' onsubmit='return confirm(\"Really restart now?\")'><button>restart server</button>")
-	f("<input type='checkbox' name='reindex'> reindex</form></li>")
+	f("<input type='checkbox' name='reindex'> reindex <input type='checkbox' name='recovery'> recovery</form></li>")
+	f("</form></li>")
 	if env.OnGCE() {
 		console, err := sh.googleCloudConsole()
 		if err != nil {
@@ -311,6 +314,7 @@ func (sh *StatusHandler) serveRestart(rw http.ResponseWriter, req *http.Request)
 	}
 
 	reindex := (req.FormValue("reindex") == "on")
+	recovery := (req.FormValue("recovery") == "on")
 
 	log.Println("Restarting camlistored")
 	rw.Header().Set("Connection", "close")
@@ -318,7 +322,7 @@ func (sh *StatusHandler) serveRestart(rw http.ResponseWriter, req *http.Request)
 	if f, ok := rw.(http.Flusher); ok {
 		f.Flush()
 	}
-	osutil.RestartProcess(fmt.Sprintf("-reindex=%t", reindex))
+	osutil.RestartProcess(fmt.Sprintf("-reindex=%t", reindex), fmt.Sprintf("-recovery=%t", recovery))
 }
 
 var cgoEnabled bool
