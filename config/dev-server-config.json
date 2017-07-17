@@ -24,9 +24,24 @@
 			"handler": "app",
 			"enabled": ["_env", "${CAMLI_HELLO_ENABLED}"],
 			"handlerArgs": {
+				"prefix": "/hello/",
+				"serverListen": "localhost:3179",
 				"program": "hello",
 				"appConfig": {
 					"word": "world"
+				}
+			}
+		},
+
+		"/scancab/": {
+			"handler": "app",
+			"enabled": true,
+			"handlerArgs": {
+				"prefix": "/scancab/",
+				"serverListen": "localhost:3179",
+				"program": "scanningcabinet",
+				"appConfig": {
+					"sourceRoot": ["_env", "${CAMLI_DEV_CAMLI_ROOT}/app/scanningcabinet/ui", ""]
 				}
 			}
 		},
@@ -349,6 +364,9 @@
 				"picasa": {
 					"clientSecret": ["_env", "${CAMLI_PICASA_API_KEY}", ""]
 				},
+				"plaid": {
+					"clientSecret": ["_env", "${CAMLI_PLAID_API_KEY}", ""]
+				},
 				"twitter": {
 					"clientSecret": ["_env", "${CAMLI_TWITTER_API_KEY}", ""]
 				}
@@ -358,7 +376,8 @@
 		"/share/": {
 			"handler": "share",
 			"handlerArgs": {
-				"blobRoot": "/bs/"
+				"blobRoot": "/bs/",
+				"index": ["_env", "${CAMLI_INDEXER_PATH}"]
 			}
 		}
 	}

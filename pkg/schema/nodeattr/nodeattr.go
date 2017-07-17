@@ -53,6 +53,12 @@ const (
 	// 3339 format.
 	DatePublished = "datePublished"
 
+	// TODO(mpl): ask Brad what he wants. The original DueDate from the .py code (which is not in schema.org), or that.
+
+	// PaymentDueDate is http://schema.org/paymentDueDate in RFC
+	// 3339 format.
+	PaymentDueDate = "paymentDueDate"
+
 	// Title is http://schema.org/title
 	Title = "title"
 
@@ -71,6 +77,7 @@ const (
 	// as a city name, or a full postal address.
 	LocationText = "locationText"
 
+	Altitude  = "altitude"
 	Latitude  = "latitude"
 	Longitude = "longitude"
 
@@ -109,4 +116,7 @@ const (
 	// DefaultVisibility is "camliDefVis", which affects the default
 	// visibility of the concerned permanode in the web UI.
 	DefaultVisibility = "camliDefVis"
+
+	// Version is http://schema.org/version
+	Version = "version"
 )
