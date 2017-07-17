@@ -277,6 +277,8 @@ func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blo
 		name := fr.FileName()
 		if strings.HasSuffix(name, ".css") {
 			mime = "text/css"
+		} else if strings.HasSuffix(name, ".json") {
+			mime = "application/json"
 		}
 	}
 	if mime == "" {
