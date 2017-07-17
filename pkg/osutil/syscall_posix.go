@@ -54,7 +54,20 @@ func mksocket(path string) error {
 func maxFD() (uint64, error) {
 	var rlim syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim); err != nil {
+		if err == syscall.ENOSYS {
+			// syscall.Getrlimit() not implemented in ARMv5, and it returns this string
+			return 0, ErrNotSupported
+		}
 		return 0, fmt.Errorf("ulimit error: %v", err)
 	}
-	return rlim.Cur, nil
+	// On FreeBSD Getrlimit returns an int64, because (among other things) the
+	// maximum value for the Rlimit struct fields, called RLIM_INFINITY used to
+	// be defined as -1.
+	// According to
+	// https://github.com/freebsd/freebsd/blob/master/sys/sys/resource.h , it looks
+	// like it is now defined as
+	// #define	RLIM_INFINITY	((rlim_t)(((__uint64_t)1 << 63) - 1))
+	// which is the maximum positive value of an int64. So casting to an uint64
+	// should be ok.
+	return uint64(rlim.Cur), nil
 }

@@ -44,6 +44,7 @@ goog.require('cam.blobref');
 goog.require('cam.DetailView');
 goog.require('cam.Dialog');
 goog.require('cam.DirectoryDetail');
+goog.require('cam.MapAspect');
 goog.require('cam.Header');
 goog.require('cam.Navigator');
 goog.require('cam.PermanodeDetail');
@@ -87,9 +88,9 @@ cam.IndexPage = React.createClass({
 		history: React.PropTypes.shape({pushState:React.PropTypes.func.isRequired, replaceState:React.PropTypes.func.isRequired, go:React.PropTypes.func.isRequired, state:React.PropTypes.object}).isRequired,
 		openWindow: React.PropTypes.func.isRequired,
 		location: React.PropTypes.shape({href:React.PropTypes.string.isRequired, reload:React.PropTypes.func.isRequired}).isRequired,
-		scrolling: cam.BlobItemContainerReact.originalSpec.propTypes.scrolling,
+		scrolling: cam.BlobItemContainerReact.propTypes.scrolling,
 		serverConnection: React.PropTypes.instanceOf(cam.ServerConnection).isRequired,
-		timer: cam.Header.originalSpec.propTypes.timer,
+		timer: cam.Header.propTypes.timer,
 	},
 
 	// Invoked once right before initial rendering. This is essentially IndexPage's
@@ -155,6 +156,14 @@ cam.IndexPage = React.createClass({
 			uploadDialogVisible: false,
 			totalBytesToUpload: 0,
 			totalBytesComplete: 0,
+
+			// messageDialogContents is for displaying a message to
+			// the user. It is the child of getMessageDialog_(). To
+			// display a message, set messageDialogContents to whatever
+			// you want (div, string, etc), and set
+			// messageDialogVisible to true.
+			messageDialogContents: null,
+			messageDialogVisible: false,
 		};
 	},
 
@@ -184,7 +193,8 @@ cam.IndexPage = React.createClass({
 				aspects[selectedAspect] && aspects[selectedAspect].createContent(contentSize, this.state.backwardPiggy)
 			),
 			this.getSidebar_(aspects[selectedAspect]),
-			this.getUploadDialog_()
+			this.getUploadDialog_(),
+			this.getMessageDialog_()
 		);
 	},
 
@@ -207,7 +217,6 @@ cam.IndexPage = React.createClass({
 	},
 
 	getAspects_: function() {
-		var childFrameClickHandler = this.navigator_.navigate.bind(this.navigator_);
 		var target = this.getTargetBlobref_();
 		var getAspect = function(f) {
 			return f(target, this.targetSearchSession_);
@@ -215,12 +224,13 @@ cam.IndexPage = React.createClass({
 
 		var specificAspects = [
 			cam.ImageDetail.getAspect,
-			// TODO(mpl): think about whether DirectoryDetail should stay a specificAspect
+			// TODO(mpl): redo DirectoryDetail to look like a Blobs Container
 			cam.DirectoryDetail.getAspect.bind(null, this.baseURL_, this.props.serverConnection),
 		].map(getAspect).filter(goog.functions.identity);
 
 		var generalAspects = [
 			this.getSearchAspect_.bind(null, specificAspects),
+			cam.MapAspect.getAspect.bind(null, this.props.config, this.props.availWidth, this.props.availHeight - this.HEADER_HEIGHT_, this.childSearchSession_),
 			cam.PermanodeDetail.getAspect.bind(null, this.props.serverConnection, this.props.timer),
 			cam.BlobDetail.getAspect.bind(null, this.getDetailURL_, this.props.serverConnection),
 		].map(getAspect).filter(goog.functions.identity);
@@ -630,7 +640,7 @@ cam.IndexPage = React.createClass({
 			query = this.state.currentURL.getParameterValue('q') || '';
 		}
 
-		return cam.Header(
+		return React.createElement(cam.Header,
 			{
 				currentSearch: query,
 				errors: this.getErrors_(),
@@ -642,7 +652,7 @@ cam.IndexPage = React.createClass({
 					return React.DOM.a(
 						{
 							key: val.title,
-							className: React.addons.classSet({
+							className: classNames({
 								'cam-header-main-control-active': idx == selectedAspectIndex,
 							}),
 							href: this.state.currentURL.clone().setFragment(val.fragment).toString(),
@@ -658,6 +668,7 @@ cam.IndexPage = React.createClass({
 				ref: 'header',
 				timer: this.props.timer,
 				width: this.props.availWidth,
+				config: this.props.config,
 			}
 		)
 	},
@@ -1055,11 +1066,73 @@ cam.IndexPage = React.createClass({
 		);
 	},
 
+	getDownloadSelectionItem_: function() {
+		return goreact.DownloadItemsBtn('donwloadBtnSidebar',
+			this.props.config,
+			// TODO(mpl): I'm doing the selection business in javascript for now,
+			// since we already have the search session results handy.
+			// It shouldn't be any problem to move it to Go later.
+			function() {
+				var selection = goog.object.getKeys(this.state.selection);
+				var files = [];
+				selection.forEach(function(br) {
+					var meta = this.childSearchSession_.getResolvedMeta(br);
+					if (!meta || !meta.file || !meta.file.fileName) {
+						// TODO(mpl): only do direct files for now. maybe recurse later.
+						return;
+					}
+					files.push(meta.blobRef);
+				}.bind(this))
+				return files;
+			}.bind(this));
+	},
+
+	getShareSelectionItem_: function() {
+		return goreact.ShareItemsBtn('shareBtnSidebar',
+			this.props.config,
+			// TODO(mpl): I'm doing the selection business in javascript for now,
+			// since we already have the search session results handy.
+			// It shouldn't be any problem to move it to Go later.
+			function() {
+				var selection = goog.object.getKeys(this.state.selection);
+				var files = [];
+				selection.forEach(function(br) {
+					var meta = this.childSearchSession_.getResolvedMeta(br);
+					if (!meta) {
+						return;
+					}
+					if (meta.dir) {
+						files.push({'blobRef': meta.blobRef, 'isDir': 'true'});
+						return;
+					}
+					if (meta.file) {
+						files.push({'blobRef': meta.blobRef, 'isDir': 'false'});
+						return;
+					}
+				}.bind(this))
+				return files;
+			}.bind(this),
+			function(sharedURL, anchorText) {
+				// TODO(mpl): Port the dialog to Go.
+				this.setState({
+					messageDialogVisible: true,
+					messageDialogContents: React.DOM.div({
+						style: {
+							textAlign: 'center',
+							position: 'relative',
+						},},
+						React.DOM.div({}, 'Share URL:'),
+						React.DOM.div({}, React.DOM.a({href: sharedURL}, anchorText))
+					),
+				});
+			}.bind(this));
+	},
+
 	getSidebar_: function(selectedAspect) {
 		if (selectedAspect) {
 			if (selectedAspect.fragment == 'search' || selectedAspect.fragment == 'contents') {
 				var count = goog.object.getCount(this.state.selection);
-				return cam.Sidebar( {
+				return React.createElement(cam.Sidebar, {
 					isExpanded: this.state.sidebarVisible,
 					header: React.DOM.span(
 						{
@@ -1081,6 +1154,8 @@ cam.IndexPage = React.createClass({
 						this.getRemoveSelectionFromSetItem_(),
 						this.getDeleteSelectionItem_(),
 						this.getViewOriginalSelectionItem_(),
+						this.getDownloadSelectionItem_(),
+						this.getShareSelectionItem_(),
 					].filter(goog.functions.identity),
 					selectedItems: this.state.selection
 				});
@@ -1091,12 +1166,39 @@ cam.IndexPage = React.createClass({
 	},
 
 	getTagsControl_: function() {
-		return cam.TagsControl(
-			{
-				selectedItems: this.state.selection,
-				searchSession: this.childSearchSession_,
-				serverConnection: this.props.serverConnection
-			}
+		return React.createElement(cam.TagsControl, {
+			selectedItems: this.state.selection,
+			searchSession: this.childSearchSession_,
+			serverConnection: this.props.serverConnection
+		});
+	},
+
+	getMessageDialog_: function() {
+		if (!this.state.messageDialogVisible) {
+			return null;
+		}
+
+		var borderWidth = 18;
+		// TODO(mpl): make it dynamically proportional to the size of
+		// the contents. For now, I know I want to display a ~40 chars wide
+		// message, hence the rough 50em*16px/em.
+		var w = 50*16;
+		var h = 10*16;
+
+		return React.createElement(cam.Dialog, {
+				availWidth: this.props.availWidth,
+				availHeight: this.props.availHeight,
+				width: w,
+				height: h,
+				borderWidth: borderWidth,
+				onClose: function() {
+					this.setState({
+						messageDialogVisible: false,
+						messageDialogContents: null,
+					});
+				}.bind(this),
+			},
+			this.state.messageDialogContents
 		);
 	},
 
@@ -1120,7 +1222,7 @@ cam.IndexPage = React.createClass({
 			spriteWidth: piggyWidth,
 			spriteHeight: piggyHeight,
 			style: {
-				'margin-right': 3,
+				marginRight: 3,
 				position: 'relative',
 				display: 'inline-block',
 			}
@@ -1163,19 +1265,19 @@ cam.IndexPage = React.createClass({
 
 		function getIcon() {
 			if (this.isUploading_()) {
-				return cam.SpritedAnimation(cam.object.extend(iconProps, {
+				return React.createElement(cam.SpritedAnimation, cam.object.extend(iconProps, {
 					numFrames: 48,
 					src: 'glitch/npc_piggy__x1_chew_png_1354829433.png',
 				}));
 			} else if (this.state.dropActive) {
-				return cam.SpritedAnimation(cam.object.extend(iconProps, {
+				return React.createElement(cam.SpritedAnimation, cam.object.extend(iconProps, {
 					loopDelay: 4000,
 					numFrames: 48,
 					src: 'glitch/npc_piggy__x1_look_screen_png_1354829434.png',
 					startFrame: 6,
 				}));
 			} else {
-				return cam.SpritedImage(cam.object.extend(iconProps, {
+				return React.createElement(cam.SpritedImage, cam.object.extend(iconProps, {
 					index: 0,
 					src: 'glitch/npc_piggy__x1_look_screen_png_1354829434.png',
 				}));
@@ -1209,8 +1311,7 @@ cam.IndexPage = React.createClass({
 			return Math.round(100 * (this.state.totalBytesComplete / this.state.totalBytesToUpload));
 		}
 
-		return cam.Dialog(
-			{
+		return React.createElement(cam.Dialog, {
 				availWidth: this.props.availWidth,
 				availHeight: this.props.availHeight,
 				width: w,
@@ -1222,7 +1323,7 @@ cam.IndexPage = React.createClass({
 				{
 					className: 'cam-index-upload-dialog',
 					style: {
-						'text-align': 'center',
+						textAlign: 'center',
 						position: 'relative',
 						left: -piggyWidth / 2,
 						top: (h - piggyHeight - borderWidth * 2) / 2,
@@ -1250,7 +1351,7 @@ cam.IndexPage = React.createClass({
 		var sidebarOpenWidth = sidebarClosedWidth - this.SIDEBAR_OPEN_WIDTH_;
 		var scale = sidebarOpenWidth / sidebarClosedWidth;
 
-		return cam.BlobItemContainerReact({
+		return React.createElement(cam.BlobItemContainerReact, {
 			key: 'blobitemcontainer',
 			ref: 'blobItemContainer',
 			availHeight: this.props.availHeight,

@@ -311,8 +311,12 @@ func (hl *handlerLoader) setupHandler(prefix string) {
 	hl.curPrefix = prefix
 
 	if strings.HasPrefix(h.htype, "storage-") {
-		stype := strings.TrimPrefix(h.htype, "storage-")
 		// Assume a storage interface
+		stype := strings.TrimPrefix(h.htype, "storage-")
+		if h.htype == "storage-index" && hl.reindex {
+			// Let the indexer know that we're in reindex mode
+			h.conf["reindex"] = true
+		}
 		pstorage, err := blobserver.CreateStorage(stype, hl, h.conf)
 		if err != nil {
 			exitFailure("error instantiating storage for prefix %q, type %q: %v",
@@ -342,7 +346,7 @@ func (hl *handlerLoader) setupHandler(prefix string) {
 		// camlistored.go derives (if needed) a more useful hl.baseURL,
 		// after h.conf was generated, so we provide it as well to
 		// FromJSONConfig so NewHandler can benefit from it.
-		hc, err := app.FromJSONConfig(h.conf, hl.baseURL)
+		hc, err := app.FromJSONConfig(h.conf, prefix, hl.baseURL)
 		if err != nil {
 			exitFailure("error setting up app config for prefix %q: %v", h.prefix, err)
 		}
@@ -555,6 +559,9 @@ func (config *Config) InstallHandlers(hi HandlerInstaller, baseURL string, reind
 	}
 
 	for prefix, vei := range prefixes {
+		if prefix == "_knownkeys" {
+			continue
+		}
 		if !strings.HasPrefix(prefix, "/") {
 			exitFailure("prefix %q doesn't start with /", prefix)
 		}

@@ -56,6 +56,7 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2/google"
+	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/option"
 	storageapi "google.golang.org/api/storage/v1"
@@ -75,6 +76,7 @@ var (
 	tlsKeyFile  = flag.String("tlskey", "", "TLS private key file")
 	alsoRun     = flag.String("also_run", "", "[optiona] Path to run as a child process. (Used to run camlistore.org's ./scripts/run-blob-server)")
 	devMode     = flag.Bool("dev", false, "in dev mode")
+	flagStaging = flag.Bool("staging", false, "Deploy to a test GCE instance. Requires -cloudlaunch=true")
 
 	gceProjectID = flag.String("gce_project_id", "", "GCE project ID; required if not running on GCE and gce_log_name is specified.")
 	gceLogName   = flag.String("gce_log_name", "", "GCE Cloud Logging log name; if non-empty, logs go to Cloud Logging instead of Apache-style local disk log files")
@@ -85,8 +87,18 @@ var (
 	flagChromeBugRepro = flag.Bool("chrome_bug", false, "Run the chrome bug repro demo for issue #660. True in production.")
 )
 
+const (
+	stagingInstName = "camweb-staging" // name of the GCE instance when testing
+	stagingHostname = "staging.camlistore.net"
+)
+
 var (
 	inProd bool
+	// inStaging is whether this instance is the staging server. This should only be true
+	// if inProd is also true - they are not mutually exclusive; staging is still prod -
+	// because we want to test the same code paths as in production. The code then runs
+	// on another GCE instance, and on the stagingHostname host.
+	inStaging bool
 
 	pageHTML, errorHTML, camliErrorHTML *template.Template
 	packageHTML                         *txttemplate.Template
@@ -351,8 +363,8 @@ func findAndServeFile(rw http.ResponseWriter, req *http.Request, root string) {
 	// if directory request, try to find an index file
 	if fi.IsDir() {
 		for _, index := range indexFiles {
-			absPath = filepath.Join(root, relPath, index)
-			fi, err = os.Lstat(absPath)
+			childAbsPath := filepath.Join(root, relPath, index)
+			childFi, err := os.Lstat(childAbsPath)
 			if err != nil {
 				if os.IsNotExist(err) {
 					// didn't find this file, try the next
@@ -362,6 +374,8 @@ func findAndServeFile(rw http.ResponseWriter, req *http.Request, root string) {
 				serveError(rw, req, relPath, err)
 				return
 			}
+			fi = childFi
+			absPath = childAbsPath
 			break
 		}
 	}
@@ -451,6 +465,10 @@ func (h *redirectRootHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request)
 
 	host := strings.ToLower(r.Host)
 	if host == "www.camlistore.org" || (inProd && r.TLS == nil) {
+		if inStaging {
+			http.Redirect(rw, r, "https://"+stagingHostname+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
 		http.Redirect(rw, r, "https://camlistore.org"+r.URL.RequestURI(), http.StatusFound)
 		return
 	}
@@ -515,7 +533,11 @@ func gceDeployHandler(prefix string) (*gce.DeployHandler, error) {
 	var err error
 	scheme := "https"
 	if inProd {
-		hostPort = "camlistore.org:443"
+		if inStaging {
+			hostPort = stagingHostname + ":443"
+		} else {
+			hostPort = "camlistore.org:443"
+		}
 	} else {
 		addr := *httpsAddr
 		if *devMode && *httpsAddr == "" {
@@ -557,8 +579,9 @@ var launchConfig = &cloudlaunch.Config{
 	Scopes: []string{
 		storageapi.DevstorageFullControlScope,
 		compute.ComputeScope,
-		logging.Scope,
+		logging.WriteScope,
 		datastore.ScopeDatastore,
+		cloudresourcemanager.CloudPlatformScope,
 	},
 }
 
@@ -569,7 +592,9 @@ func checkInProduction() bool {
 	proj, _ := metadata.ProjectID()
 	inst, _ := metadata.InstanceName()
 	log.Printf("Running on GCE: %v / %v", proj, inst)
-	return proj == "camlistore-website" && inst == "camweb"
+	prod := proj == "camlistore-website" && inst == "camweb" || inst == stagingInstName
+	inStaging = prod && inst == stagingInstName
+	return prod
 }
 
 const (
@@ -592,12 +617,21 @@ func setProdFlags() {
 	buildbotBackend = "https://travis-ci.org/camlistore/camlistore"
 	buildbotHost = "build.camlistore.org"
 	*gceLogName = "camweb-access-log"
+	if inStaging {
+		*gceLogName += "-staging"
+	}
 	*root = filepath.Join(prodSrcDir, "website")
 	*gitContainer = true
 
 	*adminEmail = "mathieu.lonjaret@gmail.com" // for let's encrypt
 	*emailsTo = "camlistore-commits@googlegroups.com"
 	*smtpServer = "50.19.239.94:2500" // double firewall: rinetd allow + AWS
+	if inStaging {
+		// in staging, keep emailsTo so we get in the loop that does the
+		// git pull and refreshes the content, but no smtpServer so
+		// we don't actually try to send any e-mail.
+		*smtpServer = ""
+	}
 
 	os.RemoveAll(prodSrcDir)
 	if err := os.MkdirAll(prodSrcDir, 0755); err != nil {
@@ -608,14 +642,23 @@ func setProdFlags() {
 	getDockerImage("camlistore/demoblobserver", "docker-demoblobserver.tar.gz")
 
 	log.Printf("cloning camlistore git tree...")
-	out, err := exec.Command("docker", "run",
+	cloneArgs := []string{
+		"run",
 		"--rm",
 		"-v", "/var/camweb:/var/camweb",
 		"camlistore/git",
 		"git",
 		"clone",
-		"https://camlistore.googlesource.com/camlistore",
-		prodSrcDir).CombinedOutput()
+	}
+	if inStaging {
+		// We work off the staging branch, so we stay in control of the
+		// website contents, regardless of which commits are landing on the
+		// master branch in the meantime.
+		cloneArgs = append(cloneArgs, "-b", "staging", "https://github.com/camlistore/camlistore.git", prodSrcDir)
+	} else {
+		cloneArgs = append(cloneArgs, "https://camlistore.googlesource.com/camlistore", prodSrcDir)
+	}
+	out, err := exec.Command("docker", cloneArgs...).CombinedOutput()
 	if err != nil {
 		log.Fatalf("git clone: %v, %s", err, out)
 	}
@@ -751,7 +794,7 @@ func httpClient(projID string) *http.Client {
 	if err != nil {
 		log.Fatalf("Error reading --gce_jwt_file value: %v", err)
 	}
-	jwtConf, err := google.JWTConfigFromJSON(jsonSlurp, logging.Scope)
+	jwtConf, err := google.JWTConfigFromJSON(jsonSlurp, logging.WriteScope)
 	if err != nil {
 		log.Fatalf("Error reading --gce_jwt_file value: %v", err)
 	}
@@ -771,9 +814,35 @@ func projectID() string {
 	return projID
 }
 
+func initStaging() error {
+	if *flagStaging {
+		launchConfig.Name = stagingInstName
+		return nil
+	}
+	// If we are the instance that has just been deployed, we can't rely on
+	// *flagStaging, since there's no way to pass flags through launchConfig.
+	// And we need to know if we're a staging instance, so we can set
+	// launchConfig.Name properly before we get into restartLoop from
+	// MaybeDeploy. So we use our own instance name as a hint.
+	if !metadata.OnGCE() {
+		return nil
+	}
+	instName, err := metadata.InstanceName()
+	if err != nil {
+		return fmt.Errorf("Instance could not get its Instance Name: %v", err)
+	}
+	if instName == stagingInstName {
+		launchConfig.Name = stagingInstName
+	}
+	return nil
+}
+
 func main() {
-	launchConfig.MaybeDeploy()
 	flag.Parse()
+	if err := initStaging(); err != nil {
+		log.Fatalf("Error setting up staging: %v", err)
+	}
+	launchConfig.MaybeDeploy()
 	setProdFlags()
 
 	if *root == "" {
@@ -843,31 +912,31 @@ func main() {
 		ctx := context.Background()
 		var logc *logging.Client
 		if metadata.OnGCE() {
-			logc, err = logging.NewClient(ctx, projID, *gceLogName)
+			logc, err = logging.NewClient(ctx, projID)
 		} else {
-			logc, err = logging.NewClient(ctx, projID, *gceLogName, option.WithHTTPClient(hc))
+			logc, err = logging.NewClient(ctx, projID, option.WithHTTPClient(hc))
 		}
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := logc.Ping(); err != nil {
+		if err := logc.Ping(ctx); err != nil {
 			log.Fatalf("Failed to ping Google Cloud Logging: %v", err)
 		}
-		handler = NewLoggingHandler(handler, gceLogger{logc})
+		handler = NewLoggingHandler(handler, gceLogger{logc.Logger(*gceLogName)})
 		if gceLauncher != nil {
 			var logc *logging.Client
 			if metadata.OnGCE() {
-				logc, err = logging.NewClient(ctx, projID, *gceLogName)
+				logc, err = logging.NewClient(ctx, projID)
 			} else {
-				logc, err = logging.NewClient(ctx, projID, *gceLogName, option.WithHTTPClient(hc))
+				logc, err = logging.NewClient(ctx, projID, option.WithHTTPClient(hc))
 			}
 			if err != nil {
 				log.Fatal(err)
 			}
-			logc.CommonLabels = map[string]string{
+			commonLabels := logging.CommonLabels(map[string]string{
 				"from": "camli-gce-launcher",
-			}
-			logger := logc.Logger(logging.Default)
+			})
+			logger := logc.Logger(*gceLogName, commonLabels).StandardLogger(logging.Default)
 			logger.SetPrefix("launcher: ")
 			gceLauncher.SetLogger(logger)
 		}
@@ -937,7 +1006,11 @@ func serveHTTPS(httpServer *http.Server) error {
 		}
 		domain = host
 	} else {
-		domain = "camlistore.org"
+		if inStaging {
+			domain = stagingHostname
+		} else {
+			domain = "camlistore.org"
+		}
 		cacheDir = autocert.DirCache(prodLECacheDir)
 	}
 	m := autocert.Manager{
@@ -948,7 +1021,6 @@ func serveHTTPS(httpServer *http.Server) error {
 	if *adminEmail != "" {
 		m.Email = *adminEmail
 	}
-
 	httpsServer.TLSConfig = &tls.Config{
 		GetCertificate: m.GetCertificate,
 	}
