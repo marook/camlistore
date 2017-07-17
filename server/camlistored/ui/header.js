@@ -51,13 +51,14 @@ cam.Header = React.createClass({
 		helpURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
 		homeURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
 		importersURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
-		mainControls: React.PropTypes.arrayOf(React.PropTypes.renderable),
+		mainControls: React.PropTypes.arrayOf(React.PropTypes.node),
 		onNewPermanode: React.PropTypes.func,
 		onSearch: React.PropTypes.func,
 		favoritesURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
 		statusURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
 		timer: React.PropTypes.shape({setTimeout:React.PropTypes.func.isRequired, clearTimeout:React.PropTypes.func.isRequired}).isRequired,
 		width: React.PropTypes.number.isRequired,
+		config: React.PropTypes.object.isRequired,
 	},
 
 	focusSearch: function() {
@@ -90,11 +91,13 @@ cam.Header = React.createClass({
 				{
 					className: 'cam-header-main',
 				},
-				React.DOM.tr(null,
-					this.getPiggy_(),
-					this.getTitle_(),
-					this.getSearchbox_(),
-					this.getMainControls_()
+				React.DOM.tbody(null,
+					React.DOM.tr(null,
+						this.getPiggy_(),
+						this.getTitle_(),
+						this.getSearchbox_(),
+						this.getMainControls_()
+					)
 				)
 			),
 			this.getMenuDropdown_()
@@ -117,14 +120,14 @@ cam.Header = React.createClass({
 
 		var image = function() {
 			if (this.props.errors.length) {
-				return cam.SpritedAnimation(cam.object.extend(props, {
+				return React.createElement(cam.SpritedAnimation, cam.object.extend(props, {
 					key: 'error',
 					loopDelay: 10 * 1000,
 					numFrames: 65,
 					src: 'glitch/npc_piggy__x1_too_much_nibble_png_1354829441.png',
 				}));
 			} else {
-				return cam.SpritedImage(cam.object.extend(props, {
+				return React.createElement(cam.SpritedImage, cam.object.extend(props, {
 					key: 'ok',
 					index: 5,
 					src: 'glitch/npc_piggy__x1_chew_png_1354829433.png',
@@ -186,7 +189,7 @@ cam.Header = React.createClass({
 	getMainControls_: function() {
 		return React.DOM.td(
 			{
-				className: React.addons.classSet({
+				className: classNames({
 					'cam-header-item': true,
 					'cam-header-main-controls': true,
 					'cam-header-main-controls-empty': !this.props.mainControls.length,
@@ -226,8 +229,23 @@ cam.Header = React.createClass({
 			this.getMenuItem_('Server status', this.props.statusURL),
 			this.getMenuItem_('Favorites', this.props.favoritesURL),
 			this.getMenuItem_('Help', this.props.helpURL),
+			// We could use getMenuItem_, and only implement
+			// the onClick part with Go, but we're instead also
+			// reimplementing getMenuItem_ to demo that we can
+			// create react elements in Go.
+			this.getAboutDialog_(),
 			errorItems
 		);
+	},
+
+	getAboutDialog_: function() {
+		return goreact.AboutMenuItem('About',
+			// TODO(mpl): link to https://camlistore.org in
+			// dialog text. But dialogs can only have text. So
+			// we'll need to make our own modal later.
+			'This is the web interface to a Camlistore server',
+			'cam-header-menu-item',
+			this.props.config);
 	},
 
 	getMenuItem_: function(text, opt_link, opt_onClick, opt_class) {
@@ -315,6 +333,6 @@ cam.Header = React.createClass({
 	},
 
 	getSearchNode_: function() {
-		return this.refs['searchbox'].getDOMNode();
+		return this.refs.searchbox;
 	},
 });

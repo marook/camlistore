@@ -46,6 +46,7 @@ import (
 	"camlistore.org/pkg/blobserver"
 	"camlistore.org/pkg/blobserver/localdisk"
 	"camlistore.org/pkg/buildinfo"
+	"camlistore.org/pkg/cacher"
 	"camlistore.org/pkg/constants"
 	"camlistore.org/pkg/fileembed"
 	"camlistore.org/pkg/httputil"
@@ -676,7 +677,7 @@ func (ph *publishHandler) NewRequest(w http.ResponseWriter, r *http.Request) (*p
 		ph:              ph,
 		rw:              w,
 		req:             r,
-		suffix:          suffix,
+		suffix:          strings.TrimSuffix(suffix, "/"),
 		base:            base,
 		subres:          res,
 		rootpn:          ph.rootNode,
@@ -687,7 +688,13 @@ func (ph *publishHandler) NewRequest(w http.ResponseWriter, r *http.Request) (*p
 
 func (pr *publishRequest) serveHTTP() {
 	if !pr.rootpn.Valid() {
-		pr.rw.WriteHeader(404)
+		http.NotFound(pr.rw, pr.req)
+		return
+	}
+
+	if pr.suffix == "" {
+		// Do not show everything at the root.
+		http.Error(pr.rw, "403 forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -699,7 +706,7 @@ func (pr *publishRequest) serveHTTP() {
 
 	if err := pr.findSubject(); err != nil {
 		if err == os.ErrNotExist {
-			pr.rw.WriteHeader(404)
+			http.NotFound(pr.rw, pr.req)
 			return
 		}
 		logf("Error looking up %s/%q: %v", pr.rootpn, pr.suffix, err)
@@ -930,11 +937,10 @@ func (pr *publishRequest) serveFileDownload(des *search.DescribedBlob) {
 		}
 	}
 	dh := &server.DownloadHandler{
-		Fetcher:   pr.ph.cl,
-		Cache:     pr.ph.cache,
+		Fetcher:   cacher.NewCachingFetcher(pr.ph.cache, pr.ph.cl),
 		ForceMIME: mimeType,
 	}
-	dh.ServeHTTP(pr.rw, pr.req, fileref)
+	dh.ServeFile(pr.rw, pr.req, fileref)
 }
 
 // Given a described blob, optionally follows a camliContent and
@@ -970,17 +976,12 @@ func (pr *publishRequest) fileSchemaRefFromBlob(des *search.DescribedBlob) (file
 // subjectHeader returns the PageHeader corresponding to the described subject.
 func (pr *publishRequest) subjectHeader(described map[string]*search.DescribedBlob) *publish.PageHeader {
 	subdes := described[pr.subject.String()]
-	scheme := "http"
-	if pr.req.TLS != nil {
-		scheme = "https"
-	}
 	header := &publish.PageHeader{
 		Title:           html.EscapeString(getTitle(subdes.BlobRef, described)),
 		CSSFiles:        pr.cssFiles(),
 		JSDeps:          pr.jsDeps(),
 		Subject:         pr.subject,
 		Host:            pr.req.Host,
-		Scheme:          scheme,
 		SubjectBasePath: pr.subjectBasePath,
 		PathPrefix:      pr.base,
 		PublishedRoot:   pr.publishedRoot,

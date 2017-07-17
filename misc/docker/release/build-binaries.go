@@ -81,6 +81,7 @@ func rev() string {
 }
 
 func version() string {
+	// TODO(mpl): cut the rev to 10 chars, like make.go would do?
 	if *flagVersion != "" {
 		return fmt.Sprintf("%v (git rev %v)", *flagVersion, rev())
 	}
@@ -148,6 +149,7 @@ func build() {
 	oldPath := os.Getenv("PATH")
 	os.Setenv("GOPATH", "/gopath")
 	os.Setenv("PATH", "/usr/local/go/bin:"+oldPath)
+	check(os.Setenv("CAMLI_GOPHERJS_GOROOT", "/usr/local/go"))
 	cmd := exec.Command("go", "run", "make.go", "--os", *buildOS)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
