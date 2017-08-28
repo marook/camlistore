@@ -22,9 +22,9 @@ blobserver.
 The proxycache blobserver type also takes a sorted.KeyValue reference
 which it uses as the LRU for which old items to evict from the cache.
 
-Be aware that maxCacheBytes is only the upper limit for the blob's
-content. The cache blob storage might actually grow bigger on disk
-because of storage overhead.
+maxCacheBytes is only the upper limit for the blob's content. The cache
+blob storage might actually grow bigger on disk because of storage
+overhead.
 
 Example config:
 
