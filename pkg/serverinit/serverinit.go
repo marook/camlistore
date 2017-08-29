@@ -176,7 +176,7 @@ func makeCamliHandler(prefix, baseURL string, storage blobserver.Storage, hf blo
 		&blobserver.Config{
 			Writable:      true,
 			Readable:      true,
-			Deletable:     false,
+			Deletable:     true,
 			URLBase:       baseURL + prefix[:len(prefix)-1],
 			CanLongPoll:   canLongPoll,
 			HandlerFinder: hf,
