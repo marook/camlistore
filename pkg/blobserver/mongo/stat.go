@@ -23,6 +23,7 @@ import (
 
 	"go4.org/syncutil"
 
+	"labix.org/v2/mgo"
 	"labix.org/v2/mgo/bson"
 )
 
@@ -38,7 +39,11 @@ func (m *mongoStorage) StatBlobs(dest chan<- blob.SizedRef, blobs []blob.Ref) er
 			defer statGate.Done()
 			var doc blobDoc
 			if err := m.c.Find(bson.M{"key": b.String()}).Select(bson.M{"size": 1}).One(&doc); err != nil {
-				return fmt.Errorf("error statting %v: %v", b, err)
+				if(err == mgo.ErrNotFound) {
+					return nil
+				} else {
+					return fmt.Errorf("error statting %v: %v", b, err)
+				}
 			}
 			dest <- blob.SizedRef{Ref: b, Size: doc.Size}
 			return nil
