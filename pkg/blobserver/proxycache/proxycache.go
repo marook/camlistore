@@ -163,6 +163,7 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 	}
 	cacheBytes := calcCacheBytesFromBlobAccessMap(&blobAccessMap)
 	blobAccessHeap := builbBlobAccessHeapFromBlobAccessMap(&blobAccessMap)
+	log.Printf("proxycache uses %v of %v bytes", cacheBytes, maxCacheBytes)
 
 	s := &sto{
 		origin:                  originSto,
