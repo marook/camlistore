@@ -279,6 +279,8 @@ func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blo
 			mime = "text/css"
 		} else if strings.HasSuffix(name, ".json") {
 			mime = "application/json"
+		} else if strings.HasSuffix(name, ".js") {
+			mime = "application/javascript"
 		}
 	}
 	if mime == "" {
