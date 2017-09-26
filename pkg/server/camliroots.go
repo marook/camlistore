@@ -257,6 +257,17 @@ func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWrite
 		rw.Header().Set("Content-Disposition", "attachment; filename="+fileName)
 	}
 
+	for _, headerSpec := range permanodeDescribe.Permanode.Attr["per:httpHeader"] {
+		separatorIndex := strings.Index(headerSpec, "=")
+		if separatorIndex == -1 {
+			log.Printf("Missign separator in per:httpHeader \"%v\" with permanode %v", headerSpec, permanodeDescribe.BlobRef)
+			continue
+		}
+		headerName := headerSpec[:separatorIndex]
+		headerValue := headerSpec[separatorIndex + 1:]
+		rw.Header().Set(headerName, headerValue)
+	}
+
 	http.ServeContent(rw, req, "", time.Now(), fi.rs)
 }
 
