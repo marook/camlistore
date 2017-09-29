@@ -28,10 +28,12 @@ package mgo
 
 import (
 	"errors"
-	"labix.org/v2/mgo/bson"
+	"fmt"
 	"net"
 	"sync"
 	"time"
+
+	"labix.org/v2/mgo/bson"
 )
 
 type replyFunc func(err error, reply *replyOp, docNum int, docData []byte)
@@ -45,8 +47,8 @@ type mongoSocket struct {
 	nextRequestId uint32
 	replyFuncs    map[uint32]replyFunc
 	references    int
-	auth          []authInfo
-	logout        []authInfo
+	creds         []Credential
+	logout        []Credential
 	cachedNonce   string
 	gotNonce      sync.Cond
 	dead          error
@@ -73,6 +75,7 @@ type queryOp struct {
 	flags      queryOpFlags
 	replyFunc  replyFunc
 
+	mode       Mode
 	options    queryWrapper
 	hasOptions bool
 	serverTags []bson.D
@@ -85,12 +88,36 @@ type queryWrapper struct {
 	Explain        bool        "$explain,omitempty"
 	Snapshot       bool        "$snapshot,omitempty"
 	ReadPreference bson.D      "$readPreference,omitempty"
+	MaxScan        int         "$maxScan,omitempty"
+	MaxTimeMS      int         "$maxTimeMS,omitempty"
+	Comment        string      "$comment,omitempty"
 }
 
 func (op *queryOp) finalQuery(socket *mongoSocket) interface{} {
-	if op.flags&flagSlaveOk != 0 && len(op.serverTags) > 0 && socket.ServerInfo().Mongos {
+	if op.flags&flagSlaveOk != 0 && socket.ServerInfo().Mongos {
+		var modeName string
+		switch op.mode {
+		case Strong:
+			modeName = "primary"
+		case Monotonic, Eventual:
+			modeName = "secondaryPreferred"
+		case PrimaryPreferred:
+			modeName = "primaryPreferred"
+		case Secondary:
+			modeName = "secondary"
+		case SecondaryPreferred:
+			modeName = "secondaryPreferred"
+		case Nearest:
+			modeName = "nearest"
+		default:
+			panic(fmt.Sprintf("unsupported read mode: %d", op.mode))
+		}
 		op.hasOptions = true
-		op.options.ReadPreference = bson.D{{"mode", "secondaryPreferred"}, {"tags", op.serverTags}}
+		op.options.ReadPreference = make(bson.D, 0, 2)
+		op.options.ReadPreference = append(op.options.ReadPreference, bson.DocElem{"mode", modeName})
+		if len(op.serverTags) > 0 {
+			op.options.ReadPreference = append(op.options.ReadPreference, bson.DocElem{"tags", op.serverTags})
+		}
 	}
 	if op.hasOptions {
 		if op.query == nil {
@@ -122,19 +149,23 @@ type replyOp struct {
 type insertOp struct {
 	collection string        // "database.collection"
 	documents  []interface{} // One or more documents to insert
+	flags      uint32
 }
 
 type updateOp struct {
-	collection string // "database.collection"
-	selector   interface{}
-	update     interface{}
-	flags      uint32
+	Collection string      `bson:"-"` // "database.collection"
+	Selector   interface{} `bson:"q"`
+	Update     interface{} `bson:"u"`
+	Flags      uint32      `bson:"-"`
+	Multi      bool        `bson:"multi,omitempty"`
+	Upsert     bool        `bson:"upsert,omitempty"`
 }
 
 type deleteOp struct {
-	collection string // "database.collection"
-	selector   interface{}
-	flags      uint32
+	Collection string      `bson:"-"` // "database.collection"
+	Selector   interface{} `bson:"q"`
+	Flags      uint32      `bson:"-"`
+	Limit      int         `bson:"limit"`
 }
 
 type killCursorsOp struct {
@@ -191,8 +222,9 @@ func (socket *mongoSocket) InitialAcquire(serverInfo *mongoServerInfo, timeout t
 		panic("Socket acquired out of cache with references")
 	}
 	if socket.dead != nil {
+		dead := socket.dead
 		socket.Unlock()
-		return socket.dead
+		return dead
 	}
 	socket.references++
 	socket.serverInfo = serverInfo
@@ -299,10 +331,11 @@ func (socket *mongoSocket) kill(err error, abend bool) {
 	socket.replyFuncs = make(map[uint32]replyFunc)
 	server := socket.server
 	socket.server = nil
+	socket.gotNonce.Broadcast()
 	socket.Unlock()
-	for _, f := range replyFuncs {
+	for _, replyFunc := range replyFuncs {
 		logf("Socket %p to %s: notifying replyFunc of closed socket: %s", socket, socket.addr, err.Error())
-		f(err, nil, -1, nil)
+		replyFunc(err, nil, -1, nil)
 	}
 	if abend {
 		server.AbendSocket(socket)
@@ -310,24 +343,33 @@ func (socket *mongoSocket) kill(err error, abend bool) {
 }
 
 func (socket *mongoSocket) SimpleQuery(op *queryOp) (data []byte, err error) {
-	var mutex sync.Mutex
+	var wait, change sync.Mutex
+	var replyDone bool
 	var replyData []byte
 	var replyErr error
-	mutex.Lock()
+	wait.Lock()
 	op.replyFunc = func(err error, reply *replyOp, docNum int, docData []byte) {
-		replyData = docData
-		replyErr = err
-		mutex.Unlock()
+		change.Lock()
+		if !replyDone {
+			replyDone = true
+			replyErr = err
+			if err == nil {
+				replyData = docData
+			}
+		}
+		change.Unlock()
+		wait.Unlock()
 	}
 	err = socket.Query(op)
 	if err != nil {
 		return nil, err
 	}
-	mutex.Lock() // Wait.
-	if replyErr != nil {
-		return nil, replyErr
-	}
-	return replyData, nil
+	wait.Lock()
+	change.Lock()
+	data = replyData
+	err = replyErr
+	change.Unlock()
+	return data, err
 }
 
 func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
@@ -347,6 +389,11 @@ func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
 
 	for _, op := range ops {
 		debugf("Socket %p to %s: serializing op: %#v", socket, socket.addr, op)
+		if qop, ok := op.(*queryOp); ok {
+			if cmd, ok := qop.query.(*findCmd); ok {
+				debugf("Socket %p to %s: find command: %#v", socket, socket.addr, cmd)
+			}
+		}
 		start := len(buf)
 		var replyFunc replyFunc
 		switch op := op.(type) {
@@ -354,22 +401,22 @@ func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
 		case *updateOp:
 			buf = addHeader(buf, 2001)
 			buf = addInt32(buf, 0) // Reserved
-			buf = addCString(buf, op.collection)
-			buf = addInt32(buf, int32(op.flags))
-			debugf("Socket %p to %s: serializing selector document: %#v", socket, socket.addr, op.selector)
-			buf, err = addBSON(buf, op.selector)
+			buf = addCString(buf, op.Collection)
+			buf = addInt32(buf, int32(op.Flags))
+			debugf("Socket %p to %s: serializing selector document: %#v", socket, socket.addr, op.Selector)
+			buf, err = addBSON(buf, op.Selector)
 			if err != nil {
 				return err
 			}
-			debugf("Socket %p to %s: serializing update document: %#v", socket, socket.addr, op.update)
-			buf, err = addBSON(buf, op.update)
+			debugf("Socket %p to %s: serializing update document: %#v", socket, socket.addr, op.Update)
+			buf, err = addBSON(buf, op.Update)
 			if err != nil {
 				return err
 			}
 
 		case *insertOp:
 			buf = addHeader(buf, 2002)
-			buf = addInt32(buf, 0) // Reserved
+			buf = addInt32(buf, int32(op.flags))
 			buf = addCString(buf, op.collection)
 			for _, doc := range op.documents {
 				debugf("Socket %p to %s: serializing document for insertion: %#v", socket, socket.addr, doc)
@@ -408,10 +455,10 @@ func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
 		case *deleteOp:
 			buf = addHeader(buf, 2006)
 			buf = addInt32(buf, 0) // Reserved
-			buf = addCString(buf, op.collection)
-			buf = addInt32(buf, int32(op.flags))
-			debugf("Socket %p to %s: serializing selector document: %#v", socket, socket.addr, op.selector)
-			buf, err = addBSON(buf, op.selector)
+			buf = addCString(buf, op.Collection)
+			buf = addInt32(buf, int32(op.Flags))
+			debugf("Socket %p to %s: serializing selector document: %#v", socket, socket.addr, op.Selector)
+			buf, err = addBSON(buf, op.Selector)
 			if err != nil {
 				return err
 			}
@@ -425,7 +472,7 @@ func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
 			}
 
 		default:
-			panic("Internal error: unknown operation type")
+			panic("internal error: unknown operation type")
 		}
 
 		setInt32(buf, start, int32(len(buf)-start))
@@ -442,6 +489,7 @@ func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
 
 	socket.Lock()
 	if socket.dead != nil {
+		dead := socket.dead
 		socket.Unlock()
 		debugf("Socket %p to %s: failing query, already closed: %s", socket, socket.addr, socket.dead.Error())
 		// XXX This seems necessary in case the session is closed concurrently
@@ -449,10 +497,10 @@ func (socket *mongoSocket) Query(ops ...interface{}) (err error) {
 		for i := 0; i != requestCount; i++ {
 			request := &requests[i]
 			if request.replyFunc != nil {
-				request.replyFunc(socket.dead, nil, -1, nil)
+				request.replyFunc(dead, nil, -1, nil)
 			}
 		}
-		return socket.dead
+		return dead
 	}
 
 	wasWaiting := len(socket.replyFuncs) > 0
@@ -500,7 +548,6 @@ func (socket *mongoSocket) readLoop() {
 	s := make([]byte, 4)
 	conn := socket.conn // No locking, conn never changes.
 	for {
-		// XXX Handle timeouts, , etc
 		err := fill(conn, p)
 		if err != nil {
 			socket.kill(err, true)
@@ -533,7 +580,10 @@ func (socket *mongoSocket) readLoop() {
 		stats.receivedDocs(int(reply.replyDocs))
 
 		socket.Lock()
-		replyFunc, replyFuncFound := socket.replyFuncs[uint32(responseTo)]
+		replyFunc, ok := socket.replyFuncs[uint32(responseTo)]
+		if ok {
+			delete(socket.replyFuncs, uint32(responseTo))
+		}
 		socket.Unlock()
 
 		if replyFunc != nil && reply.replyDocs == 0 {
@@ -542,6 +592,9 @@ func (socket *mongoSocket) readLoop() {
 			for i := 0; i != int(reply.replyDocs); i++ {
 				err := fill(conn, s)
 				if err != nil {
+					if replyFunc != nil {
+						replyFunc(err, nil, -1, nil)
+					}
 					socket.kill(err, true)
 					return
 				}
@@ -556,6 +609,9 @@ func (socket *mongoSocket) readLoop() {
 
 				err = fill(conn, b[4:])
 				if err != nil {
+					if replyFunc != nil {
+						replyFunc(err, nil, -1, nil)
+					}
 					socket.kill(err, true)
 					return
 				}
@@ -575,11 +631,7 @@ func (socket *mongoSocket) readLoop() {
 			}
 		}
 
-		// Only remove replyFunc after iteration, so that kill() will see it.
 		socket.Lock()
-		if replyFuncFound {
-			delete(socket.replyFuncs, uint32(responseTo))
-		}
 		if len(socket.replyFuncs) == 0 {
 			// Nothing else to read for now. Disable deadline.
 			socket.conn.SetReadDeadline(time.Time{})

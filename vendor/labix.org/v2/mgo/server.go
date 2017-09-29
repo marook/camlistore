@@ -28,11 +28,12 @@ package mgo
 
 import (
 	"errors"
-	"labix.org/v2/mgo/bson"
 	"net"
 	"sort"
 	"sync"
 	"time"
+
+	"labix.org/v2/mgo/bson"
 )
 
 // ---------------------------------------------------------------------------
@@ -66,9 +67,11 @@ func (dial dialer) isSet() bool {
 }
 
 type mongoServerInfo struct {
-	Master bool
-	Mongos bool
-	Tags   bson.D
+	Master         bool
+	Mongos         bool
+	Tags           bson.D
+	MaxWireVersion int
+	SetName        string
 }
 
 var defaultServerInfo mongoServerInfo
@@ -81,14 +84,13 @@ func newServer(addr string, tcpaddr *net.TCPAddr, sync chan bool, dial dialer) *
 		sync:         sync,
 		dial:         dial,
 		info:         &defaultServerInfo,
+		pingValue:    time.Hour, // Push it back before an actual ping.
 	}
-	// Once so the server gets a ping value, then loop in background.
-	server.pinger(false)
 	go server.pinger(true)
 	return server
 }
 
-var errSocketLimit = errors.New("per-server connection limit reached")
+var errPoolLimit = errors.New("per-server connection limit reached")
 var errServerClosed = errors.New("server was closed")
 
 // AcquireSocket returns a socket for communicating with the server.
@@ -96,9 +98,10 @@ var errServerClosed = errors.New("server was closed")
 // it will establish a new one. The returned socket is owned by the call site,
 // and will return to the cache when the socket has its Release method called
 // the same number of times as AcquireSocket + Acquire were called for it.
-// If the limit argument is not zero, a socket will only be returned if the
-// number of sockets in use for this server is under the provided limit.
-func (server *mongoServer) AcquireSocket(limit int, timeout time.Duration) (socket *mongoSocket, abended bool, err error) {
+// If the poolLimit argument is greater than zero and the number of sockets in
+// use in this server is greater than the provided limit, errPoolLimit is
+// returned.
+func (server *mongoServer) AcquireSocket(poolLimit int, timeout time.Duration) (socket *mongoSocket, abended bool, err error) {
 	for {
 		server.Lock()
 		abended = server.abended
@@ -107,9 +110,9 @@ func (server *mongoServer) AcquireSocket(limit int, timeout time.Duration) (sock
 			return nil, abended, errServerClosed
 		}
 		n := len(server.unusedSockets)
-		if limit > 0 && len(server.liveSockets)-n >= limit {
+		if poolLimit > 0 && len(server.liveSockets)-n >= poolLimit {
 			server.Unlock()
-			return nil, false, errSocketLimit
+			return nil, false, errPoolLimit
 		}
 		if n > 0 {
 			socket = server.unusedSockets[n-1]
@@ -159,6 +162,11 @@ func (server *mongoServer) Connect(timeout time.Duration) (*mongoSocket, error) 
 		// Cannot do this because it lacks timeout support. :-(
 		//conn, err = net.DialTCP("tcp", nil, server.tcpaddr)
 		conn, err = net.DialTimeout("tcp", server.ResolvedAddr, timeout)
+		if tcpconn, ok := conn.(*net.TCPConn); ok {
+			tcpconn.SetKeepAlive(true)
+		} else if err == nil {
+			panic("internal error: obtained TCP connection is not a *net.TCPConn!?")
+		}
 	case dial.old != nil:
 		conn, err = dial.old(server.tcpaddr)
 	case dial.new != nil:
@@ -270,9 +278,18 @@ NextTagSet:
 	return false
 }
 
-var pingDelay = 5 * time.Second
+var pingDelay = 15 * time.Second
 
 func (server *mongoServer) pinger(loop bool) {
+	var delay time.Duration
+	if raceDetector {
+		// This variable is only ever touched by tests.
+		globalMutex.Lock()
+		delay = pingDelay
+		globalMutex.Unlock()
+	} else {
+		delay = pingDelay
+	}
 	op := queryOp{
 		collection: "admin.$cmd",
 		query:      bson.D{{"ping", 1}},
@@ -281,10 +298,10 @@ func (server *mongoServer) pinger(loop bool) {
 	}
 	for {
 		if loop {
-			time.Sleep(pingDelay)
+			time.Sleep(delay)
 		}
 		op := op
-		socket, _, err := server.AcquireSocket(0, 3*pingDelay)
+		socket, _, err := server.AcquireSocket(0, delay)
 		if err == nil {
 			start := time.Now()
 			_, _ = socket.SimpleQuery(&op)
@@ -385,9 +402,18 @@ func (servers *mongoServers) Empty() bool {
 	return len(servers.slice) == 0
 }
 
+func (servers *mongoServers) HasMongos() bool {
+	for _, s := range servers.slice {
+		if s.Info().Mongos {
+			return true
+		}
+	}
+	return false
+}
+
 // BestFit returns the best guess of what would be the most interesting
 // server to perform operations on at this point in time.
-func (servers *mongoServers) BestFit(serverTags []bson.D) *mongoServer {
+func (servers *mongoServers) BestFit(mode Mode, serverTags []bson.D) *mongoServer {
 	var best *mongoServer
 	for _, next := range servers.slice {
 		if best == nil {
@@ -404,9 +430,11 @@ func (servers *mongoServers) BestFit(serverTags []bson.D) *mongoServer {
 		switch {
 		case serverTags != nil && !next.info.Mongos && !next.hasTags(serverTags):
 			// Must have requested tags.
-		case next.info.Master != best.info.Master:
-			// Prefer slaves.
-			swap = best.info.Master
+		case mode == Secondary && next.info.Master && !next.info.Mongos:
+			// Must be a secondary or mongos.
+		case next.info.Master != best.info.Master && mode != Nearest:
+			// Prefer slaves, unless the mode is PrimaryPreferred.
+			swap = (mode == PrimaryPreferred) != best.info.Master
 		case absDuration(next.pingValue-best.pingValue) > 15*time.Millisecond:
 			// Prefer nearest server.
 			swap = next.pingValue < best.pingValue
