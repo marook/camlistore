@@ -132,7 +132,16 @@ type Client struct {
 	viaMu sync.RWMutex
 	via   map[blob.Ref]blob.Ref // target => via (target is referenced from via)
 
-	log             *log.Logger // not nil
+	// Verbose controls how much logging from the client is printed. The caller
+	// should set it only before using the client, and treat it as read-only after
+	// that.
+	Verbose bool
+	// Logger is the logger used by the client. It defaults to a standard
+	// logger to os.Stderr if the client is initialized by one of the package's
+	// functions. Like Verbose, it should be set only before using the client, and
+	// not be modified afterwards.
+	Logger *log.Logger
+
 	httpGate        *syncutil.Gate
 	transportConfig *TransportConfig // or nil
 
@@ -195,7 +204,7 @@ func (c *Client) NewPathClient(path string) *Client {
 func NewStorageClient(s blobserver.Storage) *Client {
 	return &Client{
 		sto:       s,
-		log:       log.New(os.Stderr, "", log.Ldate|log.Ltime),
+		Logger:    log.New(os.Stderr, "", log.Ldate|log.Ltime),
 		haveCache: noHaveCache{},
 	}
 }
@@ -335,7 +344,7 @@ func NewFromShareRoot(shareBlobURL string, opts ...ClientOption) (c *Client, tar
 	var root string
 	m := shareURLRx.FindStringSubmatch(shareBlobURL)
 	if m == nil {
-		return nil, blob.Ref{}, fmt.Errorf("Unkown share URL base")
+		return nil, blob.Ref{}, fmt.Errorf("Unknown share URL base")
 	}
 	c = New(m[1], opts...)
 	c.discoOnce.Do(noop)
@@ -404,11 +413,9 @@ func (c *Client) SetHaveCache(cache HaveCache) {
 	c.haveCache = cache
 }
 
-func (c *Client) SetLogger(logger *log.Logger) {
-	if logger == nil {
-		c.log = log.New(ioutil.Discard, "", 0)
-	} else {
-		c.log = logger
+func (c *Client) printf(format string, v ...interface{}) {
+	if c.Verbose && c.Logger != nil {
+		c.Logger.Printf(format, v)
 	}
 }
 
@@ -654,18 +661,22 @@ func (c *Client) GetClaims(req *search.ClaimsRequest) (*search.ClaimsResponse, e
 	return res, nil
 }
 
-func (c *Client) Query(req *search.SearchQuery) (*search.SearchResult, error) {
+func (c *Client) query(req *search.SearchQuery) (*http.Response, error) {
 	sr, err := c.SearchRoot()
 	if err != nil {
 		return nil, err
 	}
 	url := sr + req.URLSuffix()
-	body, err := json.MarshalIndent(req, "", "\t")
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 	hreq := c.newRequest("POST", url, bytes.NewReader(body))
-	hres, err := c.expect2XX(hreq)
+	return c.expect2XX(hreq)
+}
+
+func (c *Client) Query(req *search.SearchQuery) (*search.SearchResult, error) {
+	hres, err := c.query(req)
 	if err != nil {
 		return nil, err
 	}
@@ -674,6 +685,17 @@ func (c *Client) Query(req *search.SearchQuery) (*search.SearchResult, error) {
 		return nil, err
 	}
 	return res, nil
+}
+
+// QueryRaw sends req and returns the body of the response, which should be the
+// unparsed JSON of a search.SearchResult.
+func (c *Client) QueryRaw(req *search.SearchQuery) ([]byte, error) {
+	hres, err := c.query(req)
+	if err != nil {
+		return nil, err
+	}
+	defer hres.Body.Close()
+	return ioutil.ReadAll(hres.Body)
 }
 
 // SearchExistingFileSchema does a search query looking for an
@@ -1289,7 +1311,7 @@ func newClient(server string, mode auth.AuthMode, opts ...ClientOption) *Client 
 	c := &Client{
 		server:    server,
 		haveCache: noHaveCache{},
-		log:       log.New(os.Stderr, "", log.Ldate|log.Ltime),
+		Logger:    log.New(os.Stderr, "", log.Ldate|log.Ltime),
 		authMode:  mode,
 	}
 	for _, v := range opts {

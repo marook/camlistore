@@ -19,63 +19,209 @@ goog.provide('cam.MapAspect');
 goog.require('cam.SearchSession');
 goog.require('cam.Thumber');
 
+// freeze/unfreeze cluster plugin, strongly inspired from
+// https://github.com/ghybs/Leaflet.MarkerCluster.Freezable
+L.MarkerClusterGroup.include({
+	unfreeze: function () {
+		this._processQueue();
+		if (!this._map) {
+			return this;
+		}
+		this._unfreeze();
+		return this;
+	},
+
+	freeze: function () {
+		this._processQueue();
+		if (!this._map) {
+			return this;
+		}
+		this._initiateFreeze();
+		return this;
+	},
+
+	_initiateFreeze: function () {
+		var map = this._map;
+
+		// Start freezing
+		this._frozen = true;
+
+		if (map) {
+			// Change behaviour on zoomEnd and moveEnd.
+			map.off('zoomend', this._zoomEnd, this);
+			map.off('moveend', this._moveEnd, this);
+		}
+	},
+
+	_unfreeze: function () {
+		var map = this._map;
+
+		this._frozen = false;
+
+		if (map) {
+			// Restore original behaviour on zoomEnd.
+			map.on('zoomend', this._zoomEnd, this);
+			map.on('moveend', this._moveEnd, this);
+
+			if (this._unspiderfy && this._spiderfied) {
+				this._unspiderfy();
+			}
+			this._zoomEnd();
+		}
+	}
+});
+
+
 cam.MapAspect = React.createClass({
+	// QUERY_LIMIT_ is the maximum number of location markers to draw. It is not
+	// arbitrary, as higher numbers (such as 1000) seem to be causing glitches.
+	// (https://github.com/camlistore/camlistore/issues/937)
+	// However, the cluster plugin restricts the number of items displayed at the
+	// same time to a way lower number, allowing us to work-around these glitches.
+	QUERY_LIMIT_: 1000,
+	// ZOOM_COOLDOWN_ is how much time to wait, after we've stopped zooming/panning,
+	// before actually searching for new results.
+	ZOOM_COOLDOWN_: 500,
+
 	propTypes: {
 		availWidth: React.PropTypes.number.isRequired,
 		availHeight: React.PropTypes.number.isRequired,
 		searchSession: React.PropTypes.instanceOf(cam.SearchSession).isRequired,
 		config: React.PropTypes.object.isRequired,
+		updateSearchBar: React.PropTypes.func.isRequired,
+		setPendingQuery: React.PropTypes.func.isRequired,
 	},
 
 	componentWillMount: function() {
-		this.latitude = 0.0;
-		this.longitude = 0.0;
 		this.location = {
 			North: 0.0,
 			South: 0.0,
 			East: 0.0,
 			West: 0.0,
 		};
+		this.clusteringOn = this.props.config.mapClustering;
+		if (this.clusteringOn == false) {
+			// Even 100 is actually too much, and https://github.com/camlistore/camlistore/issues/937 ensues
+			this.QUERY_LIMIT_ = 100;
+		}
+		// isMoving, in conjunction with ZOOM_COOLDOWN_, allows to actually ask for
+		// new results only once we've stopped zooming/panning.
+		this.isMoving = false;
+		this.firstLoad = true;
 		this.markers = {};
+		if (this.cluster) {
+			this.cluster.clearLayers();
+		} else if (this.markersGroup) {
+			this.markersGroup.clearLayers();
+		}
+		this.cluster = null;
+		this.markersGroup = null;
+		this.mapQuery = null;
+		this.locationFound = false;
+		this.locationFromMarkers = null;
+		this.initialSearchSession = this.props.searchSession;
+	},
+
+	componentWillReceiveProps: function(nextProps) {
+		if (this.props == nextProps) {
+			// first load. componentWillMount takes care of the init.
+			return;
+		}
+		if (this.props.searchSession == nextProps.searchSession) {
+			// search session has not changed, nothing to do.
+			return;
+		}
+		// Everything below is how we reload from (almost) scratch when a new search is
+		// entered in the search box.
+		this.componentWillMount();
+		this.initialSearchSession = nextProps.searchSession;
+		this.loadMarkers();
+	},
+
+	componentDidMount: function() {
 		this.eh_ = new goog.events.EventHandler(this);
+		var map = this.map = L.map(ReactDOM.findDOMNode(this), {
+			layers: [
+				L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+					attribution: '©  <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+				})
+			],
+			attributionControl: true,
+			noWrap: true,
+		});
+		map.setView([0., 0.], 1);
+
+		this.eh_.listen(window, 'resize', function(event) {
+			// Even after setting the bounds, or the view center+zoom, something is still
+			// very wrong, and the map's bounds seem to stay a point (instead of a rectangle).
+			// And I can't figure out why. However, any kind of resizing of the window fixes
+			// things, so we send a resize event when we're done with loading the markers,
+			// and we do one final refreshView here after the resize has happened.
+			setTimeout(function(){this.refreshMapView();}.bind(this), 1000);
+		});
+		map.on('click', this.onMapClick);
+		map.on('zoomend', this.onZoom);
+		map.on('moveend', this.onZoom);
+		this.loadMarkers();
+	},
+
+	componentWillUnmount: function() {
+		this.map.off('click', this.onMapClick);
+		this.eh_.dispose();
+		this.map = null;
+	},
+
+	render: function() {
+		return React.DOM.div(
+			{
+				className: 'map',
+				style: {
+					// we need a low zIndex so that the main piggy scroll menu stays on top of
+					// the map when it unfolds.
+					zIndex: -1,
+					// because of lowest zIndex, this is apparently needed so the map still gets
+					// click events. css is dark magic.
+					position: 'absolute',
+					width: this.props.availWidth,
+					height: this.props.availHeight,
+				},
+			}
+		);
 	},
 
 	// setCoordinatesFromSearchQuery looks into the search session query for obvious
-	// geographic coordinates. Either a location predicate ("loc:seattle"), or a raw
-	// query with just coordinates ('raw:{"permanode": {"location": {"west":
-	// -123.373922, "north": 48.636011, "east": -121.286750, "south": 46.590087}}}')
-	// are considered for now.
+	// geographic coordinates. Either a location predicate ("loc:seattle"), or a
+	// location area predicate ("locrect:48.63,-123.37,46.59,-121.28") are considered
+	// for now.
 	setCoordinatesFromSearchQuery: function() {
-		var ss = this.props.searchSession;
-		if (!ss) {
+		var q = this.initialSearchSession.getQueryExprOrRef();
+		if (goreact.IsLocPredicate(q)) {
+			// a "loc" query
+			goreact.Geocode(q.substring(goreact.LocPredicatePrefix.length), function(rect) {
+				return this.handleCoordinatesFound(rect, true);
+			}.bind(this));
 			return;
 		}
-		// TODO(mpl): it is so disgusting that ss.query_ can be both a string or an
-		// object. But that's something to fix in search session, with deep repercussions.
-		if (ss.isEmptyQuery()) {
+		if (goreact.HandleLocAreaPredicate(q, function(rect) {
+				return this.handleCoordinatesFound(rect, true);
+			}.bind(this))) {
+			// a "locrect" area query
 			return;
 		}
-		var q = ss.query_;
-		if (!q.permanode || !q.permanode.location) {
-			// Not a raw coordinates query.
-			if (!goreact.IsLocPredicate(q)) {
-				// Not a location type ("loc:foo") query
-				return;
-			}
-			goreact.Geocode(q.substring(goreact.LocPredicatePrefix.length), this.handleCoordinatesFound);
+		q = goreact.ShiftMapZoom(q);
+		if (goreact.HandleZoomPredicate(q, function(rect) {
+				return this.handleCoordinatesFound(rect, false);
+			}.bind(this))) {
+			// we have a zoom (map:) in the query
 			return;
 		}
-		this.handleCoordinatesFound({
-			North: q.permanode.location.north,
-			South: q.permanode.location.south,
-			West: q.permanode.location.west,
-			East: q.permanode.location.east,
-		});
+		// Not a location type query
+		window.dispatchEvent(new Event('resize'));
 	},
 
 	// handleCoordinatesFound sets this.location (a rectangle), this.latitude, and
 	// this.longitude (center of this.location), from the given rectangle.
-	handleCoordinatesFound: function(rect) {
+	handleCoordinatesFound: function(rect, draw) {
 		if (!rect) {
 			return;
 		}
@@ -86,33 +232,41 @@ cam.MapAspect = React.createClass({
 			return;
 		}
 		this.location = rect;
-		L.rectangle([[this.location.North, this.location.East],[this.location.South,this.location.West]], {color: "#ff7800", weight: 1}).addTo(this.map);
-		// TODO(mpl): I used to need LocationCenter in earlier versions of this code,
-		// but not right now. Keeping it for now, as it's still likely we'll need it.
-		// Otherwise, remove.
-		var center = goreact.LocationCenter(this.location.North, this.location.South, this.location.West, this.location.East);
-		this.latitude = center.Lat;
-		this.longitude = center.Long;
+		if (draw) {
+			L.rectangle([[this.location.North, this.location.East],[this.location.South,this.location.West]], {color: "#ff7800", weight: 1}).addTo(this.map);
+		}
 		this.locationFound = true;
-		this.refreshMapView();
+		window.dispatchEvent(new Event('resize'));
 		return;
 	},
 
 	// refreshMapView pans to the relevant coordinates found for the current search
 	// session, if any. Otherwise, pan to englobe all the markers that were drawn.
 	refreshMapView: function() {
-		if (this.locationFound) {
-			// pan to the location we found in the search query itself.
-			this.map.fitBounds([[this.location.North, this.location.East], [this.location.South, this.location.West]]);
-		} else if (this.locationFromMarkers) {
-			// otherwise, fit the view to encompass all the markers that were drawn
-			this.map.fitBounds(this.locationFromMarkers);
+		var zoom = null;
+		if (!this.locationFound && !this.locationFromMarkers) {
+			if (!this.mapQuery) {
+				return;
+			}
+			zoom = this.mapQuery.GetZoom();
+			if (!zoom) {
+				return;
+			}
 		}
-		// Even after setting the bounds, or the view center+zoom, something is still
-		// very wrong, and the map's bounds seem to stay a point (instead of a rectangle).
-		// And I can't figure out why. However, any kind of resizing of the window fixes
-		// things, hence the following necessary hack.
-		window.dispatchEvent(new Event('resize'));
+		if (zoom) {
+			// TODO(mpl): I think we want to remove that case, now that locationFound also
+			// takes into account when a "map:" predicate is found in the initial search
+			// session query.
+			var location = L.latLngBounds(L.latLng(zoom.North, zoom.East), L.latLng(zoom.South, zoom.West));
+		} else if (this.locationFound) {
+			// pan to the location we found in the search query itself.
+			var location = L.latLngBounds(L.latLng(this.location.North, this.location.East),
+				L.latLng(this.location.South, this.location.West));
+		} else {
+			// otherwise, fit the view to encompass all the markers that were drawn
+			var location = this.locationFromMarkers;
+		}
+		this.map.fitBounds(location);
 	},
 
 	sameLocations: function(loc1, loc2) {
@@ -123,29 +277,108 @@ cam.MapAspect = React.createClass({
 	},
 
 	// loadMarkers sets markers on the map for all the permanodes, with a location,
-	// found in the current search session. It triggers loading more results from the
-	// search session until all of them have been pinned on the map.
+	// found in the current search session.
 	loadMarkers: function() {
-		var ss = this.props.searchSession;
+		var ss = this.initialSearchSession;
 		if (!ss) {
 			return;
 		}
-		if (ss.isEmptyQuery()) {
-			console.log("refusing to load markers for an empty search query");
-			return;
+		var q = ss.getQueryExprOrRef();
+		if (q == '') {
+			q = 'has:location';
 		}
-		var q = ss.query_;
-		var blobs = ss.getCurrentResults().blobs;
-		blobs.forEach(function(b) {
-			var br = b.blob;
-			var marker = this.markers[br];
-			if (marker) {
-				// marker has already been loaded on the map
+		if (this.mapQuery == null) {
+			this.mapQuery = goreact.NewMapQuery(this.props.config.authToken, q, this.handleSearchResults,
+				function(){
+					this.props.setPendingQuery(false);
+				}.bind(this));
+			if (this.mapQuery == null) {
 				return;
 			}
-			var m = ss.getResolvedMeta(br);
+			this.mapQuery.SetLimit(this.QUERY_LIMIT_);
+		}
+		this.props.setPendingQuery(true);
+		this.mapQuery.Send();
+	},
+
+	// TODO(mpl): if we add caching of the results to the gopherjs searchsession,
+	// then getMeta, getResolvedMeta, and getTitle can become methods on the Session
+	// type, and we can remove the searchResults argument.
+
+	getMeta: function(br, searchResults) {
+		if (!searchResults || !searchResults.description || !searchResults.description.meta) {
+			return null;
+		}
+		return searchResults.description.meta[br];
+	},
+
+	getResolvedMeta: function(br, searchResults) {
+		var meta = this.getMeta(br, searchResults);
+		if (!meta) {
+			return null;
+		}
+		if (meta.camliType == 'permanode') {
+			var camliContent = cam.permanodeUtils.getSingleAttr(meta.permanode, 'camliContent');
+			if (camliContent) {
+				return searchResults.description.meta[camliContent];
+			}
+		}
+		return meta;
+	},
+
+	getTitle: function(br, searchResults) {
+		var meta = this.getMeta(br, searchResults);
+		if (!meta) {
+			return '';
+		}
+		if (meta.camliType == 'permanode') {
+			var title = cam.permanodeUtils.getSingleAttr(meta.permanode, 'title');
+			if (title) {
+				return title;
+			}
+		}
+		var rm = this.getResolvedMeta(br, searchResults);
+		return (rm && rm.camliType == 'file' && rm.file.fileName) || (rm && rm.camliType == 'directory' && rm.dir.fileName) || '';
+	},
+
+	handleSearchResults: function(searchResultsJSON) {
+		var searchResults = JSON.parse(searchResultsJSON);
+		var blobs = searchResults.blobs;
+		if (blobs == null) {
+			blobs = [];
+		}
+		// TODO(mpl): instead of all the ifs everywhere, we could just keep on using the
+		// cluster as a layer group, but completely disable clustering and spiderifying.
+		if (this.clusteringOn) {
+			if (this.cluster == null) {
+				this.cluster = L.markerClusterGroup({
+					// because we handle ourselves below what the visible markers are.
+					removeOutsideVisibleBounds: false,
+					animate: false,
+				});
+			}
+			this.cluster.addTo(this.map);
+			var toAdd = [];
+			this.cluster.unfreeze();
+		} else {
+			if (this.markersGroup == null) {
+				this.markersGroup = L.layerGroup();
+				this.markersGroup.addTo(this.map);
+			}
+			var toAdd = L.layerGroup();
+		}
+		var toKeep = {};
+		blobs.forEach(function(b) {
+			var br = b.blob;
+			var alreadyMarked = this.markers[br]
+			if (alreadyMarked && alreadyMarked != null) {
+				// marker was already added in the previous zoom level, so do not readd it.
+				toKeep[br] = true;
+				return;
+			}
+			var m = this.getResolvedMeta(br, searchResults);
 			if (!m || !m.location) {
-				var pm = ss.getMeta(br);
+				var pm = this.getMeta(br, searchResults);
 				if (!pm || !pm.location) {
 					return;
 				}
@@ -155,6 +388,7 @@ cam.MapAspect = React.createClass({
 				// contents, camliPath, etc has a location
 				var location = m.location;
 			}
+
 			// all awesome markers use markers-soft.png (body of the marker), and markers-shadow.png.
 			var iconOpts = {
 				prefix: 'fa',
@@ -179,88 +413,114 @@ cam.MapAspect = React.createClass({
 			}
 			var markerIcon = L.AwesomeMarkers.icon(iconOpts);
 			var marker = L.marker([location.latitude, location.longitude], {icon: markerIcon});
-			// Note that we've created that marker already.
-			this.markers[br] = marker;
-			marker.addTo(this.map);
+
 			if (m.image) {
 				// TODO(mpl): Do we ever want another thumb size? on mobile maybe?
 				var img = cam.Thumber.fromImageMeta(m).getSrc(64);
 				marker.bindPopup('<a href="'+this.props.config.uiRoot+br+'"><img src="'+img+'" alt="'+br+'" height="64"></a>');
 			} else {
-				var title = ss.getTitle(br);
+				var title = this.getTitle(br, searchResults);
 				if (title != '') {
 					marker.bindPopup('<a href="'+this.props.config.uiRoot+br+'">'+title+'</a>');
 				} else {
 					marker.bindPopup('<a href="'+this.props.config.uiRoot+br+'">'+br+'</a>');
 				}
 			}
+			toKeep[br] = true;
+			this.markers[br] = marker;
+			if (this.clusteringOn) {
+				toAdd.push(marker);
+			} else {
+				toAdd.addLayer(marker);
+			}
+
 			if (!this.locationFromMarkers) {
 				// initialize it as a square of 0.1 degree around the first marker placed
-				var northeast = L.latLng(location.latitude + 0.05, location.longitude - 0.05);
-				var southwest = L.latLng(location.latitude - 0.05, location.longitude + 0.05);
+				var northeast = L.latLng(location.latitude + 0.05, location.longitude + 0.05);
+				var southwest = L.latLng(location.latitude - 0.05, location.longitude - 0.05);
 				this.locationFromMarkers = L.latLngBounds(northeast, southwest);
 			} else {
 				// then grow locationFromMarkers to englobe the new marker (if needed)
 				this.locationFromMarkers.extend(L.latLng(location.latitude, location.longitude));
 			}
 		}.bind(this));
-		if (ss.isComplete()) {
-			this.refreshMapView();
-			return;
+		if (this.clusteringOn) {
+			var toRemove = [];
+		} else {
+			var toRemove = L.layerGroup();
 		}
-		ss.loadMoreResults();
-	},
+		goog.object.forEach(this.markers, function(mark, br) {
+			if (mark == null) {
+				return;
+			}
+			if (!toKeep[br]) {
+				this.markers[br] = null;
+				if (this.clusteringOn) {
+					toRemove.push(mark);
+				} else {
+					toRemove.addLayer(mark);
+				}
+			}
+		}.bind(this));
+		if (this.clusteringOn) {
+			this.cluster.removeLayers(toRemove);
+			this.cluster.addLayers(toAdd);
+			this.cluster.freeze();
+		} else {
+			this.markersGroup.removeLayer(toRemove);
+			this.markersGroup.addLayer(toAdd);
+		}
 
-	componentDidMount: function() {
-		var map = this.map = L.map(ReactDOM.findDOMNode(this), {
-			layers: [
-				L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-					attribution: '©  <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-				})
-			],
-			attributionControl: true,
-		});
-		map.setView([0., 0.], 3);
+		// TODO(mpl): reintroduce the Around/Continue logic later if needed. For now not
+		// needed/useless as MapSorted queries do not support continuation of any kind.
 
-		this.loadMarkers();
-		map.on('click', this.onMapClick);
-		this.eh_.listen(this.props.searchSession, cam.SearchSession.SEARCH_SESSION_CHANGED, function() {
-			this.loadMarkers();
-		});
-
-		this.setCoordinatesFromSearchQuery();
-	},
-
-	componentWillUnmount: function() {
-		this.map.off('click', this.onMapClick);
-		this.map = null;
+		if (this.firstLoad) {
+			this.setCoordinatesFromSearchQuery();
+		}
+		// even if we're not here because of a zoom change (i.e. either first load, or
+		// new search was entered), we still call updateSearchBar here to update the zoom
+		// predicate right shift to the search bar.
+		this.props.updateSearchBar(this.mapQuery.GetExpr());
 	},
 
 	onMapClick: function() {
 		this.refreshMapView();
 	},
 
-	render: function() {
-		return React.DOM.div(
-			{
-				className: 'map',
-				style: {
-					// we need a low zIndex so that the main piggy scroll menu stays on top of
-					// the map when it unfolds.
-					zIndex: -1,
-					// because of lowest zIndex, this is apparently needed so the map still gets
-					// click events. css is dark magic.
-					position: 'absolute',
-					width: this.props.availWidth,
-					height: this.props.availHeight,
-				},
-			}
-		);
+	onZoom: function() {
+		if (!this.mapQuery) {
+			return;
+		}
+		if (this.firstLoad) {
+			// we are most likely right after the first load, and this is not an intentional
+			// pan/zoom, but rather an "automatic" pan/zoom to the first batch of results.
+			this.firstLoad = false;
+			return;
+		}
+		if (this.isMoving) {
+			clearTimeout(this.zoomTimeout);
+		}
+		this.isMoving = true;
+		this.zoomTimeout = setTimeout(this.onZoomEnd, this.ZOOM_COOLDOWN_);
+	},
+
+	onZoomEnd: function() {
+		this.isMoving = false;
+		if (!this.map) {
+			// TODO(mpl): why the hell can this happen?
+			return;
+		}
+		if (!this.mapQuery) {
+			return;
+		}
+		var newBounds = this.map.getBounds();
+		this.mapQuery.SetZoom(newBounds.getNorth(), newBounds.getWest(), newBounds.getSouth(), newBounds.getEast());
+		this.loadMarkers();
 	}
 });
 
-cam.MapAspect.getAspect = function(config, availWidth, availHeight, childSearchSession,
-		targetBlobRef, parentSearchSession) {
+cam.MapAspect.getAspect = function(config, availWidth, availHeight, updateSearchBar, setPendingQuery,
+	childSearchSession, targetBlobRef, parentSearchSession) {
 	var searchSession = childSearchSession;
 	if (targetBlobRef) {
 		// we have a "ref:sha1-foobar" kind of query
@@ -285,10 +545,9 @@ cam.MapAspect.getAspect = function(config, availWidth, availHeight, childSearchS
 				availWidth: availWidth,
 				availHeight: availHeight,
 				searchSession: searchSession,
+				updateSearchBar: updateSearchBar,
+				setPendingQuery: setPendingQuery,
 			});
 		},
 	};
 };
-
-
-

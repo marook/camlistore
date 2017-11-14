@@ -38,8 +38,6 @@ package remote // import "camlistore.org/pkg/blobserver/remote"
 
 import (
 	"io"
-	"log"
-	"os"
 
 	"camlistore.org/pkg/blob"
 	"camlistore.org/pkg/blobserver"
@@ -77,7 +75,6 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (storage blobserv
 	if err = client.SetupAuthFromString(auth); err != nil {
 		return nil, err
 	}
-	client.SetLogger(log.New(os.Stderr, "remote", log.LstdFlags))
 	sto := &remoteStorage{
 		client: client,
 	}

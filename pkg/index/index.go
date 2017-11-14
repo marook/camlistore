@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -331,6 +332,12 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (blobserver.Stor
 	}
 	ix.InitBlobSource(sto)
 
+	if !reindex {
+		if err := ix.integrityCheck(3 * time.Second); err != nil {
+			return nil, err
+		}
+	}
+
 	return ix, err
 }
 
@@ -470,6 +477,50 @@ func (x *Index) Reindex() error {
 	}
 	if err := x.initDeletesCache(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// integrityCheck enumerates blobs through x.blobSource during timemout, and
+// verifies for each of them that it has a meta row in the index. It logs a message
+// if any of them is not found. It only returns an error if something went wrong
+// during the enumeration.
+func (x *Index) integrityCheck(timeout time.Duration) error {
+	log.Print("Starting index integrity check.")
+	defer log.Print("Index integrity check done.")
+	if x.blobSource == nil {
+		return errors.New("index: can't check sanity of index: no blobSource")
+	}
+
+	// we don't actually need seen atm, but I anticipate we'll return it at some
+	// point, so we can display the blobs that were tested/seen/missed on the web UI.
+	seen := make([]blob.Ref, 0)
+	notFound := make([]blob.Ref, 0)
+	enumCtx := context.TODO()
+	stopTime := time.NewTimer(timeout)
+	defer stopTime.Stop()
+	var errEOT = errors.New("time's out")
+	if err := blobserver.EnumerateAll(enumCtx, x.blobSource, func(sb blob.SizedRef) error {
+		select {
+		case <-stopTime.C:
+			return errEOT
+		default:
+		}
+		if _, err := x.GetBlobMeta(enumCtx, sb.Ref); err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			notFound = append(notFound, sb.Ref)
+			return nil
+		}
+		seen = append(seen, sb.Ref)
+		return nil
+	}); err != nil && err != errEOT {
+		return err
+	}
+	if len(notFound) > 0 {
+		// TODO(mpl): at least on GCE, display that message and maybe more on a web UI page as well.
+		log.Printf("WARNING: sanity checking of the index found %d non-indexed blobs out of %d tested blobs. Reindexing is advised.", len(notFound), len(notFound)+len(seen))
 	}
 	return nil
 }
@@ -650,7 +701,7 @@ func (x *Index) isDeletedNoCache(br blob.Ref) bool {
 
 // GetRecentPermanodes sends results to dest filtered by owner, limit, and
 // before.  A zero value for before will default to the current time.  The
-// results will have duplicates supressed, with most recent permanode
+// results will have duplicates suppressed, with most recent permanode
 // returned.
 // Note, permanodes more recent than before will still be fetched from the
 // index then skipped. This means runtime scales linearly with the number of
@@ -1300,6 +1351,10 @@ func (x *Index) GetFileLocation(ctx context.Context, fileRef blob.Ref) (camtypes
 		if !ok {
 			return camtypes.Location{}, os.ErrNotExist
 		}
+		// TODO(mpl): Brad says to move this check lower, in corpus func and/or when building corpus from index rows.
+		if math.IsNaN(long) || math.IsNaN(lat) {
+			return camtypes.Location{}, fmt.Errorf("Latitude or Longitude in corpus for %v is NaN. Reindex to fix it.", fileRef)
+		}
 		return camtypes.Location{Latitude: lat, Longitude: long}, nil
 	}
 	fi, err := x.GetFileInfo(ctx, fileRef)
@@ -1325,6 +1380,9 @@ func (x *Index) GetFileLocation(ctx context.Context, fileRef blob.Ref) (camtypes
 	long, err = strconv.ParseFloat(v[pipe+1:], 64)
 	if err != nil {
 		return camtypes.Location{}, fmt.Errorf("index: bogus value at position 1 in key %q = %q", key, v)
+	}
+	if math.IsNaN(long) || math.IsNaN(lat) {
+		return camtypes.Location{}, fmt.Errorf("Latitude or Longitude in index for %v is NaN. Reindex to fix it.", fileRef)
 	}
 	return camtypes.Location{Latitude: lat, Longitude: long}, nil
 }
@@ -1470,20 +1528,48 @@ func enumerateBlobMeta(s sorted.KeyValue, cb func(camtypes.BlobMeta) error) (err
 	return nil
 }
 
-// EnumerateBlobMeta sends all metadata about all known blobs to ch and then closes ch.
-func (x *Index) EnumerateBlobMeta(ctx context.Context, ch chan<- camtypes.BlobMeta) (err error) {
+var errStopIteration = errors.New("stop iteration") // local error, doesn't escape this package
+
+// EnumerateBlobMeta calls fn for all known meta blobs.
+// If fn returns false, iteration stops and an nil error is returned.
+// If ctx becomes done, iteration stops and ctx.Err() is returned.
+func (x *Index) EnumerateBlobMeta(ctx context.Context, fn func(camtypes.BlobMeta) bool) error {
 	if x.corpus != nil {
-		return x.corpus.EnumerateBlobMeta(ctx, ch)
+		var err error
+		var n int
+		done := ctx.Done()
+		x.corpus.EnumerateBlobMeta(func(m camtypes.BlobMeta) bool {
+			// Every so often, check context.
+			n++
+			if n%256 == 0 {
+				select {
+				case <-done:
+					err = ctx.Err()
+					return false
+				default:
+
+				}
+			}
+			return fn(m)
+		})
+		return err
 	}
-	defer close(ch)
-	return enumerateBlobMeta(x.s, func(bm camtypes.BlobMeta) error {
+	done := ctx.Done()
+	err := enumerateBlobMeta(x.s, func(bm camtypes.BlobMeta) error {
 		select {
-		case ch <- bm:
-		case <-ctx.Done():
+		case <-done:
 			return ctx.Err()
+		default:
+			if !fn(bm) {
+				return errStopIteration
+			}
+			return nil
 		}
-		return nil
 	})
+	if err == errStopIteration {
+		err = nil
+	}
+	return err
 }
 
 // Storage returns the index's underlying Storage implementation.

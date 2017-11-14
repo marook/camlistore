@@ -49,7 +49,7 @@ type Discovery struct {
 	AuthToken string `json:"authToken"`
 
 	// SyncHandlers lists discovery information about the available sync handlers.
-	SyncHandlers []SyncHandlerDiscovery `json:"syncHanlders,omitempty"`
+	SyncHandlers []SyncHandlerDiscovery `json:"syncHandlers,omitempty"`
 	// Signing contains discovery information for signing.
 	Signing *SignDiscovery `json:"signing,omitempty"`
 	// UIDiscovery contains discovery information for the UI.
@@ -96,6 +96,8 @@ type UIDiscovery struct {
 	// PublishRoots lists discovery information for all publishing roots,
 	// mapped by the respective root name.
 	PublishRoots map[string]*PublishRootDiscovery `json:"publishRoots"`
+	// MapClustering defines whether to cluster position markers on the map aspect.
+	MapClustering bool `json:"mapClustering"`
 }
 
 // PublishRootDiscovery contains discovery information for the publish roots.

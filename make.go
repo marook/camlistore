@@ -81,7 +81,7 @@ var (
 	// Our temporary source tree root and build dir, i.e: buildGoPath + "src/camlistore.org"
 	buildSrcDir string
 	// files mirrored from camRoot to buildSrcDir
-	rxMirrored = regexp.MustCompile(`^([a-zA-Z0-9\-\_\.]+\.(?:blobs|camli|css|eot|err|gif|go|s|pb\.go|gpg|html|ico|jpg|js|json|xml|min\.css|min\.js|mp3|otf|png|svg|pdf|psd|tiff|ttf|woff|xcf|tar\.gz|gz|tar\.xz|tbz2|zip|sh))$`)
+	rxMirrored = regexp.MustCompile(`^([a-zA-Z0-9\-\_\.]+\.(?:blobs|camli|css|eot|err|gif|go|s|pb\.go|gpg|html|ico|jpg|js|json|xml|min\.css|min\.js|mp3|otf|png|svg|pdf|psd|tiff|ttf|woff|woff2|xcf|tar\.gz|gz|tar\.xz|tbz2|zip|sh))$`)
 	// base file exceptions for the above matching, so as not to complicate the regexp any further
 	mirrorIgnored = map[string]bool{
 		"publisher.js": true, // because this file is (re)generated after the mirroring
@@ -210,6 +210,14 @@ func main() {
 
 	// TODO(mpl): no need to build publisher.js if we're not building the publisher app.
 	if withCamlistored {
+		if err := buildReactGen(); err != nil {
+			log.Fatal(err)
+		}
+
+		if err := genWebUIReact(); err != nil {
+			log.Fatal(err)
+		}
+
 		// gopherjs has to run before doEmbed since we need all the javascript
 		// to be generated before embedding happens.
 		if err := makeGopherjs(); err != nil {
@@ -370,7 +378,6 @@ func buildGopherjs() (string, error) {
 	log.Printf("Now rebuilding gopherjs at %v", bin)
 	goBin := "go"
 	if gopherjsGoroot != "" {
-		// CAMLI_GOPHERJS_GOROOT was specified
 		goBin = filepath.Join(gopherjsGoroot, "bin", "go")
 	}
 	cmd := exec.Command(goBin, "install")
@@ -382,6 +389,9 @@ func buildGopherjs() (string, error) {
 	// current (host) platform.
 	cmd.Env = setEnv(cmd.Env, "GOOS", runtime.GOOS)
 	cmd.Env = setEnv(cmd.Env, "GOARCH", runtime.GOARCH)
+	if gopherjsGoroot != "" {
+		cmd.Env = setEnv(cmd.Env, "GOROOT", gopherjsGoroot)
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("error while building gopherjs: %v, %v", err, string(out))
 	}
@@ -471,7 +481,7 @@ func genPublisherJS(gopherjsBin string) error {
 	// modtime of the existing gopherjs.js if there was no reason to.
 	output := filepath.Join(buildSrcDir, filepath.FromSlash(publisherJS))
 	tmpOutput := output + ".new"
-	args := []string{"build", "--tags", "nocgo"}
+	args := []string{"build", "--tags", "nocgo noReactBundle"}
 	if *embedResources {
 		// when embedding for "production", use -m to minify the javascript output
 		args = append(args, "-m")
@@ -551,7 +561,7 @@ func genWebUIJS(gopherjsBin string) error {
 	// modtime of the existing goui.js if there was no reason to.
 	output := filepath.Join(buildSrcDir, filepath.FromSlash(gopherjsUI))
 	tmpOutput := output + ".new"
-	args := []string{"build", "--tags", "nocgo"}
+	args := []string{"build", "--tags", "nocgo noReactBundle"}
 	if *embedResources {
 		// when embedding for "production", use -m to minify the javascript output
 		args = append(args, "-m")
@@ -564,6 +574,9 @@ func genWebUIJS(gopherjsBin string) error {
 	// Pretend we're on linux regardless of the actual host, because recommended
 	// hack to work around https://github.com/gopherjs/gopherjs/issues/511
 	cmd.Env = setEnv(cmd.Env, "GOOS", "linux")
+	if gopherjsGoroot != "" {
+		cmd.Env = setEnv(cmd.Env, "GOROOT", gopherjsGoroot)
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gopherjs for web UI error: %v, %v", err, string(out))
 	}
@@ -615,6 +628,29 @@ func genWebUIJS(gopherjsBin string) error {
 		return err
 	}
 	log.Printf("Copied gopherjs generated code for web UI to  %v", jsInCamRoot)
+	return nil
+}
+
+// genWebUIRect runs go generate on the gopherjs code of the web UI, which
+// invokes reactGen on the Go React components. This generates the boilerplate
+// code, in gen_*_reactGen.go files, required to complete those components.
+func genWebUIReact() error {
+	args := []string{"generate", "camlistore.org/server/camlistored/ui/goui/..."}
+
+	path := strings.Join([]string{
+		filepath.Join(buildGoPath, "bin"),
+		os.Getenv("PATH"),
+	}, string(os.PathListSeparator))
+
+	cmd := exec.Command("go", args...)
+	cmd.Env = append(cleanGoEnv("PATH"),
+		"GOPATH="+buildGoPath,
+		"PATH="+path,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go generate for web UI error: %v, %v", err, string(out))
+	}
+
 	return nil
 }
 
@@ -766,10 +802,22 @@ func envPair(key, value string) string {
 	return fmt.Sprintf("%s=%s", key, value)
 }
 
-// cleanGoEnv returns a copy of the current environment with GOPATH and GOBIN removed.
-// it also sets GOOS and GOARCH as needed when cross-compiling.
-func cleanGoEnv() (clean []string) {
+// cleanGoEnv returns a copy of the current environment with GOPATH, GOBIN and
+// any variable listed in others removed.  it also sets GOOS and GOARCH as
+// needed when cross-compiling.
+func cleanGoEnv(others ...string) (clean []string) {
+	excl := make([]string, len(others))
+	for i, v := range others {
+		excl[i] = v + "="
+	}
+
+Env:
 	for _, env := range os.Environ() {
+		for _, v := range excl {
+			if strings.HasPrefix(env, v) {
+				continue Env
+			}
+		}
 		if strings.HasPrefix(env, "GOPATH=") || strings.HasPrefix(env, "GOBIN=") {
 			continue
 		}
@@ -879,17 +927,27 @@ func parseGenEmbedOutputLines(r io.Reader) {
 }
 
 func buildGenfileembed() error {
+	return buildBin("camlistore.org/pkg/fileembed/genfileembed")
+}
+
+func buildReactGen() error {
+	return buildBin("camlistore.org/vendor/myitcv.io/react/cmd/reactGen")
+}
+
+func buildBin(pkg string) error {
+	pkgBase := pathpkg.Base(pkg)
+
 	args := []string{"install", "-v"}
 	if *all {
 		args = append(args, "-a")
 	}
 	args = append(args,
-		filepath.FromSlash("camlistore.org/pkg/fileembed/genfileembed"),
+		filepath.FromSlash(pkg),
 	)
 	cmd := exec.Command("go", args...)
 
 	// We don't even need to set GOBIN as it defaults to $GOPATH/bin
-	// and that is where we want genfileembed to go.
+	// and that is where we want the bin to go.
 	// Here we replace the GOOS and GOARCH valuesfrom the env with the host OS,
 	// to support cross-compiling.
 	cmd.Env = cleanGoEnv()
@@ -903,10 +961,10 @@ func buildGenfileembed() error {
 		log.Printf("Running go with args %s", args)
 	}
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Error building genfileembed: %v", err)
+		return fmt.Errorf("Error building %v: %v", pkgBase, err)
 	}
 	if *verbose {
-		log.Printf("genfileembed installed in %s", filepath.Join(buildGoPath, "bin"))
+		log.Printf("%v installed in %s", pkgBase, filepath.Join(buildGoPath, "bin"))
 	}
 	return nil
 }
@@ -925,7 +983,7 @@ var gitVersionRx = regexp.MustCompile(`\b\d\d\d\d-\d\d-\d\d-[0-9a-f]{10,10}\b`)
 
 // gitVersion returns the git version of the git repo at camRoot as a
 // string of the form "yyyy-mm-dd-xxxxxxx", with an optional trailing
-// '+' if there are any local uncomitted modifications to the tree.
+// '+' if there are any local uncommitted modifications to the tree.
 func gitVersion() string {
 	cmd := exec.Command("git", "rev-list", "--max-count=1", "--pretty=format:'%ad-%h'",
 		"--date=short", "--abbrev=10", "HEAD")
@@ -957,8 +1015,8 @@ func verifyCamlistoreRoot(dir string) {
 }
 
 const (
-	goVersionMinor  = '8'
-	gopherJSGoMinor = '8'
+	goVersionMinor  = '9'
+	gopherJSGoMinor = '9'
 )
 
 func verifyGoVersion() {

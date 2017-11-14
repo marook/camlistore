@@ -19,9 +19,7 @@ limitations under the License.
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -72,7 +70,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, "\nUsage:\n")
 	fmt.Fprintf(os.Stderr, "(Load scanner full of documents)\n")
 	fmt.Fprintf(os.Stderr, pgName+" --loop # monitor ~/scancab-queue and uploads files in it\n")
-	fmt.Fprintf(os.Stderr, pgName+" --adf # start scannig and dumping image files to ~/scancab-queue\n")
+	fmt.Fprintf(os.Stderr, pgName+" --adf # start scanning and dumping image files to ~/scancab-queue\n")
 	fmt.Fprintf(os.Stderr, "\n")
 	flag.PrintDefaults()
 }
@@ -193,28 +191,6 @@ func uploadOne(filename string) {
 	}
 }
 
-// TODO(mpl): I could use https://godoc.org/rsc.io/pdf#Reader.NumPage instead of pdfinfo,
-// if we prefer the pkg dep over the program dep.
-func pageCount(filename string) (cnt int, err error) {
-	cmd := exec.Command("pdfinfo", filename)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return cnt, fmt.Errorf("Could not get page count with pdfinfo: %v, %v", err, string(out))
-	}
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		l := sc.Text()
-		if !strings.HasPrefix(l, "Pages: ") {
-			continue
-		}
-		return strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(l, "Pages:")))
-	}
-	if err := sc.Err(); err != nil {
-		return 0, err
-	}
-	return 0, errors.New("page count not found in pdfinfo output")
-}
-
 type imageNameByTime []struct {
 	name     string
 	nanoTime int
@@ -225,7 +201,7 @@ func (a imageNameByTime) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a imageNameByTime) Less(i, j int) bool { return a[i].nanoTime < a[j].nanoTime }
 
 func uploadLoop() {
-	toUploadPattern := regexp.MustCompile(`/^image-.+-unx(\d+)\.(png|jpg)$/`)
+	toUploadPattern := regexp.MustCompile(`^image-.+-unx(\d+)\.(png|jpg)$`)
 	if err := os.Chdir(queueDir); err != nil {
 		log.Fatalf("Could not chdir to queue directory %v: %v", queueDir, err)
 	}

@@ -20,16 +20,86 @@ package geo
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 
 	"camlistore.org/pkg/geocode"
+	"camlistore.org/pkg/types/camtypes"
 )
 
 const (
-	LocPredicatePrefix = "loc"
+	LocPredicatePrefix     = "loc"
+	LocAreaPredicatePrefix = "locrect"
+	LocMapPredicatePrefix  = "map"
 )
+
+// HandleLocAreaPredicate checks whether predicate is a location area predicate
+// (locrect). If so, it runs asynchronously handleCoordinatesFound on the given
+// coordinates, and returns true. Otherwise, it returns false.
+func HandleLocAreaPredicate(predicate string, handleCoordinatesFound func(*camtypes.LocationBounds)) bool {
+	r, err := rectangleFromPredicate(predicate, LocAreaPredicatePrefix)
+	if err != nil {
+		return false
+	}
+	go handleCoordinatesFound(r)
+	return true
+}
+
+// HandleLocAreaPredicate checks whether predicate contains a map location predicate
+// (map:). If so, it runs asynchronously handleCoordinatesFound on the given
+// coordinates, and returns true. Otherwise, it returns false.
+func HandleZoomPredicate(predicate string, handleCoordinatesFound func(*camtypes.LocationBounds)) bool {
+	tp := strings.TrimSpace(predicate)
+	if tp == "" {
+		return false
+	}
+	fields := strings.Fields(tp)
+	r, err := rectangleFromPredicate(fields[len(fields)-1], LocMapPredicatePrefix)
+	if err != nil {
+		return false
+	}
+	go handleCoordinatesFound(r)
+	return true
+}
+
+// IsLocMapPredicate returns whether predicate is a map location predicate.
+func IsLocMapPredicate(predicate string) bool {
+	if _, err := rectangleFromPredicate(predicate, LocMapPredicatePrefix); err != nil {
+		return false
+	}
+	return true
+}
+
+// rectangleFromPredicate, if predicate is a valid location predicate of the given kind
+// and returns the corresponding rectangular area.
+func rectangleFromPredicate(predicate, kind string) (*camtypes.LocationBounds, error) {
+	errNotARectangle := fmt.Errorf("not a valid %v predicate", kind)
+	if !strings.HasPrefix(predicate, kind+":") {
+		return nil, errNotARectangle
+	}
+	loc := strings.TrimPrefix(predicate, kind+":")
+	coords := strings.Split(loc, ",")
+	if len(coords) != 4 {
+		return nil, errNotARectangle
+	}
+	var coord [4]float64
+	for k, v := range coords {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return nil, errNotARectangle
+		}
+		coord[k] = f
+	}
+	return &camtypes.LocationBounds{
+		North: coord[0],
+		South: coord[2],
+		East:  coord[3],
+		West:  coord[1],
+	}, nil
+}
 
 // IsLocPredicate returns whether the given predicate is a simple (as in, not
 // composed) location predicate, such as the one supported by the Camlistore search
@@ -59,20 +129,9 @@ func IsLocPredicate(predicate string) bool {
 	return true
 }
 
-// equivalent of ss.query_.permanode.location on the javascript side, where ss
-// is a search session.
-// it's convenient to use this type as a parameter of handleCoordinatesFound,
-// because handleCoordinatesFound is also called directly in the javascript code.
-type rectangle struct {
-	North float64
-	South float64
-	West  float64
-	East  float64
-}
-
 // Lookup searches for the coordinates of the given location, and passes the
 // found zone (a rectangle), if any, to handleCoordinatesFound.
-func Lookup(location string, handleCoordinatesFound func(*rectangle)) {
+func Lookup(location string, handleCoordinatesFound func(*camtypes.LocationBounds)) {
 	go func() {
 		rect, err := geocode.Lookup(context.Background(), location)
 		if err != nil {
@@ -83,7 +142,7 @@ func Lookup(location string, handleCoordinatesFound func(*rectangle)) {
 			log.Printf("no coordinates found for %v", location)
 			return
 		}
-		handleCoordinatesFound(&rectangle{
+		handleCoordinatesFound(&camtypes.LocationBounds{
 			North: rect[0].NorthEast.Lat,
 			South: rect[0].SouthWest.Lat,
 			East:  rect[0].NorthEast.Long,

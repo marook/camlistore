@@ -27,7 +27,7 @@ goog.require('goog.dom.classlist');
 goog.require('goog.events.EventHandler');
 goog.require('goog.format');
 goog.require('goog.functions');
-goog.require('goog.labs.Promise');
+goog.require('goog.Promise');
 goog.require('goog.object');
 goog.require('goog.string');
 goog.require('goog.Uri');
@@ -141,6 +141,9 @@ cam.IndexPage = React.createClass({
 		return {
 			backwardPiggy: false,
 			currentURL: null,
+			// currentSearch exists in Index just to wire together the searchbox of Header, and the Map
+			// aspect, so the Map aspect can add the zoom level to the predicate in the search box.
+			currentSearch: '',
 			currentSet: '',
 			dropActive: false,
 			selection: {},
@@ -173,7 +176,14 @@ cam.IndexPage = React.createClass({
 	render: function() {
 		var aspects = this.getAspects_();
 		var selectedAspect = goog.array.findIndex(aspects, function(v) {
-			return v.fragment == this.state.currentURL.getFragment();
+			if (v.fragment == this.state.currentURL.getFragment()) {
+				return true;
+			}
+			// we favor the map aspect if a "map:" query parameter is found.
+			if (v.fragment == 'map' && goreact.HasZoomParameter(this.state.currentURL.getDecodedQuery())) {
+				return true;
+			}
+			return false;
 		}, this);
 
 		if (selectedAspect == -1) {
@@ -230,7 +240,9 @@ cam.IndexPage = React.createClass({
 
 		var generalAspects = [
 			this.getSearchAspect_.bind(null, specificAspects),
-			cam.MapAspect.getAspect.bind(null, this.props.config, this.props.availWidth, this.props.availHeight - this.HEADER_HEIGHT_, this.childSearchSession_),
+			cam.MapAspect.getAspect.bind(null, this.props.config,
+				this.props.availWidth, this.props.availHeight - this.HEADER_HEIGHT_,
+				this.updateSearchBarOnMap_, this.setPendingQuery_, this.childSearchSession_),
 			cam.PermanodeDetail.getAspect.bind(null, this.props.serverConnection, this.props.timer),
 			cam.BlobDetail.getAspect.bind(null, this.getDetailURL_, this.props.serverConnection),
 		].map(getAspect).filter(goog.functions.identity);
@@ -271,6 +283,22 @@ cam.IndexPage = React.createClass({
 			fragment: blobref ? 'contents': 'search',
 			createContent: this.getBlobItemContainer_.bind(null, this),
 		};
+	},
+
+	// updateSearchBarOnMap_ is called within the map aspect to keep both the search
+	// bar and the URL bar in sync with what the current search is. In particular,
+	// whenever the zoom level changes, the "map:" predicate which represents the
+	// current zoom-level is updated too.
+	updateSearchBarOnMap_: function(currentSearch) {
+		this.setState({
+			currentSearch: currentSearch,
+		});
+		var newURI = this.state.currentURL.clone().setQuery("q="+currentSearch).toString();
+		this.props.history.replaceState(cam.object.extend(this.props.history.state), '', newURI);
+	},
+
+	setPendingQuery_: function(pending) {
+		this.setState({pendingQuery: pending});
 	},
 
 	handleDragStart_: function(e) {
@@ -357,7 +385,7 @@ cam.IndexPage = React.createClass({
 
 		this.onUploadStart_(files);
 
-		goog.labs.Promise.all(
+		goog.Promise.all(
 			Array.prototype.map.call(files, function(file) {
 				return uploadFile(file)
 					.then(fetchPermanodeIfExists)
@@ -385,18 +413,18 @@ cam.IndexPage = React.createClass({
 				permanodeCreated: false
 			};
 
-			var uploadFile = new goog.labs.Promise(sc.uploadFile.bind(sc, file));
+			var uploadFile = new goog.Promise(sc.uploadFile.bind(sc, file));
 
-			return goog.labs.Promise.all([new goog.labs.Promise.resolve(status), uploadFile]);
+			return goog.Promise.all([new goog.Promise.resolve(status), uploadFile]);
 		}
 
 		function fetchPermanodeIfExists(results) {
 			var status = results[0];
 			status.fileRef = results[1];
 
-			var getPermanode = new goog.labs.Promise(sc.getPermanodeWithContent.bind(sc, status.fileRef));
+			var getPermanode = new goog.Promise(sc.getPermanodeWithContent.bind(sc, status.fileRef));
 
-			return goog.labs.Promise.all([new goog.labs.Promise.resolve(status), getPermanode]);
+			return goog.Promise.all([new goog.Promise.resolve(status), getPermanode]);
 		}
 
 		function createPermanodeIfNotExists(results) {
@@ -406,18 +434,18 @@ cam.IndexPage = React.createClass({
 			if (!permanodeRef) {
 				status.permanodeCreated = true;
 
-				var createPermanode = new goog.labs.Promise(sc.createPermanode.bind(sc));
-				return goog.labs.Promise.all([new goog.labs.Promise.resolve(status), createPermanode]);
+				var createPermanode = new goog.Promise(sc.createPermanode.bind(sc));
+				return goog.Promise.all([new goog.Promise.resolve(status), createPermanode]);
 			}
 
-			return goog.labs.Promise.all([new goog.labs.Promise.resolve(status), new goog.labs.Promise.resolve(permanodeRef)]);
+			return goog.Promise.all([new goog.Promise.resolve(status), new goog.Promise.resolve(permanodeRef)]);
 		}
 
 		function updatePermanodeRef(results) {
 			var status = results[0];
 			status.permanodeRef = results[1];
 
-			return goog.labs.Promise.all([new goog.labs.Promise.resolve(status)]);
+			return goog.Promise.all([new goog.Promise.resolve(status)]);
 		}
 
 		// TODO(mpl): this implementation means that when we're dropping on a set, we send
@@ -437,12 +465,12 @@ cam.IndexPage = React.createClass({
 
 			// Permanode did not exist before, so it couldn't be a member of any set.
 			if (!status.parentRef || status.permanodeCreated) {
-				return goog.labs.Promise.all([new goog.labs.Promise.resolve(status), new goog.labs.Promise.resolve(false)]);
+				return goog.Promise.all([new goog.Promise.resolve(status), new goog.Promise.resolve(false)]);
 			}
 
 			console.log('checking membership');
-			var hasMembership = new goog.labs.Promise(sc.isCamliMember.bind(sc, status.permanodeRef, status.parentRef));
-			return goog.labs.Promise.all([new goog.labs.Promise.resolve(status), hasMembership]);
+			var hasMembership = new goog.Promise(sc.isCamliMember.bind(sc, status.permanodeRef, status.parentRef));
+			return goog.Promise.all([new goog.Promise.resolve(status), hasMembership]);
 		}
 
 		function createPermanodeAssociations(results) {
@@ -453,17 +481,17 @@ cam.IndexPage = React.createClass({
 
 			// associate uploaded file to new permanode
 			if (status.permanodeCreated) {
-				var setCamliContent = new goog.labs.Promise(sc.newSetAttributeClaim.bind(sc, status.permanodeRef, 'camliContent', status.fileRef));
+				var setCamliContent = new goog.Promise(sc.newSetAttributeClaim.bind(sc, status.permanodeRef, 'camliContent', status.fileRef));
 				promises.push(setCamliContent);
 			}
 
 			// add CamliMember relationship if viewing a set
 			if (status.parentRef && !status.isCamliMemberOfParent) {
-				var setCamliMember = new goog.labs.Promise(sc.newAddAttributeClaim.bind(sc, status.parentRef, 'camliMember', status.permanodeRef));
+				var setCamliMember = new goog.Promise(sc.newAddAttributeClaim.bind(sc, status.parentRef, 'camliMember', status.permanodeRef));
 				promises.push(setCamliMember);
 			}
 
-			return goog.labs.Promise.all(promises);
+			return goog.Promise.all(promises);
 		}
 	},
 
@@ -472,13 +500,23 @@ cam.IndexPage = React.createClass({
 			return false;
 		}
 
+		// reset the currentSearch on navigation, since the map aspect modifies it on
+		// panning/zooming.
 		var targetBlobref = this.getTargetBlobref_(newURL);
+		var currentSearch = '';
+		if (targetBlobref) {
+			currentSearch = 'ref:' + targetBlobref;
+		} else if (newURL) {
+			currentSearch = newURL.getParameterValue('q') || '';
+		}
+
 		this.updateTargetSearchSession_(targetBlobref, newURL);
 		this.updateChildSearchSession_(targetBlobref, newURL);
 		this.pruneSearchSessionCache_();
 		this.setState({
 			backwardPiggy: false,
 			currentURL: newURL,
+			currentSearch: currentSearch,
 		});
 		return true;
 	},
@@ -492,7 +530,7 @@ cam.IndexPage = React.createClass({
 		this.targetSearchSession_ = null;
 		if (targetBlobref) {
 			var opt_sort = "blobref";
-			var query = this.queryAsBlob_(targetBlobref);
+			var query = this.queryFromSearchParam_("ref:"+targetBlobref);
 			var parentPermanode = newURL.getParameterValue('p');
 			if (parentPermanode) {
 				query = this.queryFromParentPermanode_(parentPermanode);
@@ -544,12 +582,6 @@ cam.IndexPage = React.createClass({
 				},
 			},
 		};
-	},
-
-	queryAsBlob_: function(blobRef) {
-		return {
-			blobRefPrefix: blobRef,
-		}
 	},
 
 	// Finds an existing cached SearchSession that meets criteria, or creates a new one.
@@ -626,29 +658,22 @@ cam.IndexPage = React.createClass({
 	},
 
 	getHeader_: function(aspects, selectedAspectIndex) {
-		// We don't show the chooser if there's only one thing to choose from.
-		if (aspects.length == 1) {
-			aspects = [];
-		}
-
-		// TODO(aa): It would be cool to normalize the query and single target case, by supporting searches like is:<blobref>, that way we can always show something in the searchbox, even when we're not in a listview.
-		var target = this.getTargetBlobref_();
-		var query = '';
-		if (target) {
-			query = 'ref:' + target;
-		} else {
-			query = this.state.currentURL.getParameterValue('q') || '';
-		}
-
+		var chooser = this.getChooser_(aspects);
 		return React.createElement(cam.Header,
 			{
-				currentSearch: query,
+				getCurrentSearch: function() {
+					return this.state.currentSearch;
+				}.bind(this),
+				setCurrentSearch: function(e) {
+					this.setState({currentSearch: e.target.value});
+				}.bind(this),
 				errors: this.getErrors_(),
+				pendingQuery: this.state.pendingQuery,
 				height: 38,
 				helpURL: this.baseURL_.resolve(new goog.Uri(this.props.config.helpRoot)),
 				homeURL: this.baseURL_,
 				importersURL: this.baseURL_.resolve(new goog.Uri(this.props.config.importerRoot)),
-				mainControls: aspects.map(function(val, idx) {
+				mainControls: chooser.map(function(val, idx) {
 					return React.DOM.a(
 						{
 							key: val.title,
@@ -671,6 +696,14 @@ cam.IndexPage = React.createClass({
 				config: this.props.config,
 			}
 		)
+	},
+
+	getChooser_: function(aspects) {
+		// We don't show the chooser if there's only one thing to choose from.
+		if (aspects.length == 1) {
+			return [];
+		}
+		return aspects;
 	},
 
 	handleNewPermanode_: function() {
@@ -776,7 +809,7 @@ cam.IndexPage = React.createClass({
 			for (var i = 0; i < values.length; i++) {
 				if (this.state.selection[values[i]]) {
 					if (k == 'camliMember' || goog.string.startsWith(k, 'camliPath:')) {
-						changes.push(new goog.labs.Promise(sc.newDelAttributeClaim.bind(sc, target, k, values[i])));
+						changes.push(new goog.Promise(sc.newDelAttributeClaim.bind(sc, target, k, values[i])));
 					} else {
 						console.error('Unexpected attribute: ', k);
 					}
@@ -784,7 +817,7 @@ cam.IndexPage = React.createClass({
 			}
 		}
 
-		goog.labs.Promise.all(changes).then(this.refreshIfNecessary_);
+		goog.Promise.all(changes).then(this.refreshIfNecessary_);
 	},
 
 	handleOpenWindow_: function(url) {
@@ -934,6 +967,8 @@ cam.IndexPage = React.createClass({
 	getDetailURL_: function(blobref, opt_fragment) {
 		var query = this.state.currentURL.getParameterValue('q');
 		var targetBlobref = this.getTargetBlobref_();
+		// TODO(mpl): now that "ref:refprefix" searches are fully supported, maybe we
+		// could replace the mix of path+query URLs, with just query based URLs?
 		return url = this.baseURL_.clone().setPath(this.baseURL_.getPath() + blobref).setFragment(opt_fragment || '');
 	},
 
@@ -1067,33 +1102,46 @@ cam.IndexPage = React.createClass({
 	},
 
 	getDownloadSelectionItem_: function() {
-		return goreact.DownloadItemsBtn('donwloadBtnSidebar',
-			this.props.config,
-			// TODO(mpl): I'm doing the selection business in javascript for now,
-			// since we already have the search session results handy.
-			// It shouldn't be any problem to move it to Go later.
-			function() {
-				var selection = goog.object.getKeys(this.state.selection);
-				var files = [];
-				selection.forEach(function(br) {
-					var meta = this.childSearchSession_.getResolvedMeta(br);
-					if (!meta || !meta.file || !meta.file.fileName) {
-						// TODO(mpl): only do direct files for now. maybe recurse later.
-						return;
-					}
-					files.push(meta.blobRef);
-				}.bind(this))
-				return files;
-			}.bind(this));
+		var callbacks = {};
+
+		// TODO(mpl): I'm doing the selection business in javascript for now,
+		// since we already have the search session results handy.
+		// It shouldn't be any problem to move it to Go later.
+		callbacks.getSelection = function() {
+			var selection = goog.object.getKeys(this.state.selection);
+			var files = [];
+			selection.forEach(function(br) {
+				var meta = this.childSearchSession_.getResolvedMeta(br);
+				if (!meta) {
+					return;
+				}
+				if (!meta.file && !meta.dir) {
+					// br does not have a file or a directory description, so it's probably neither.
+					return;
+				}
+				if (meta.file && !meta.file.fileName) {
+					// looks like a file, but no file name
+					return;
+				}
+				if (meta.dir && !meta.dir.fileName) {
+					// looks like a dir, but no file name
+					return;
+				}
+				files.push(meta.blobRef);
+			}.bind(this))
+			return files;
+		}.bind(this);
+
+		return goreact.DownloadItemsBtn('donwloadBtnSidebar', this.props.config, callbacks);
 	},
 
 	getShareSelectionItem_: function() {
-		return goreact.ShareItemsBtn('shareBtnSidebar',
-			this.props.config,
-			// TODO(mpl): I'm doing the selection business in javascript for now,
-			// since we already have the search session results handy.
-			// It shouldn't be any problem to move it to Go later.
-			function() {
+		var callbacks = {};
+
+		// TODO(mpl): I'm doing the selection business in javascript for now,
+		// since we already have the search session results handy.
+		// It shouldn't be any problem to move it to Go later.
+		callbacks.getSelection = function() {
 				var selection = goog.object.getKeys(this.state.selection);
 				var files = [];
 				selection.forEach(function(br) {
@@ -1111,8 +1159,9 @@ cam.IndexPage = React.createClass({
 					}
 				}.bind(this))
 				return files;
-			}.bind(this),
-			function(sharedURL, anchorText) {
+			}.bind(this);
+
+		callbacks.showSharedURL = function(sharedURL, anchorText) {
 				// TODO(mpl): Port the dialog to Go.
 				this.setState({
 					messageDialogVisible: true,
@@ -1125,7 +1174,9 @@ cam.IndexPage = React.createClass({
 						React.DOM.div({}, React.DOM.a({href: sharedURL}, anchorText))
 					),
 				});
-			}.bind(this));
+			}.bind(this);
+
+		return goreact.ShareItemsBtn('shareBtnSidebar', this.props.config, callbacks);
 	},
 
 	getSidebar_: function(selectedAspect) {

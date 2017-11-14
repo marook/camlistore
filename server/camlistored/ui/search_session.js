@@ -74,6 +74,37 @@ cam.SearchSession.prototype.getQuery = function() {
 	return this.query_;
 };
 
+// getQueryExprOrRef returns the query if is a string (i.e. a search
+// expression). Otherwise it returns the empty string.
+cam.SearchSession.prototype.getQueryExprOrRef = function() {
+	var q = this.query_;
+	if (!q) {
+		return '';
+	}
+	if (typeof q === 'string') {
+		return q.trim();
+	}
+	// if it is an object (ugh!) return the blobRefPrefix if it exists
+	if (!q.blobRefPrefix) {
+		return '';
+	}
+	return 'ref:'+q.blobRefPrefix;
+};
+
+// stripMapZoom allows us to "hide" the map aspect zoom from when the search
+// session sends a query to the server. We want to keep this.query_ intact (with
+// the map zoom) though, because the map aspect relies on this.query_ as a
+// bootstrap. This is a terrible hack that should eventually go.
+cam.SearchSession.prototype.stripMapZoom = function(q) {
+	if (!q) {
+		return null;
+	}
+	if (typeof q === 'string') {
+		return goreact.DeleteMapZoom(q);
+	}
+	return q;
+};
+
 cam.SearchSession.prototype.isEmptyQuery = function() {
 	var q = this.query_;
 	if (!q) {
@@ -212,7 +243,8 @@ cam.SearchSession.prototype.getContinuation_ = function(changeType, opts) {
 		opts.sort = this.sort_;
 	}
 	opts.describe = cam.ServerConnection.DESCRIBE_REQUEST;
-	return this.connection_.search.bind(this.connection_, this.query_, opts,
+
+	return this.connection_.search.bind(this.connection_, this.stripMapZoom(this.query_), opts,
 		this.searchDone_.bind(this, changeType));
 };
 
@@ -288,7 +320,7 @@ cam.SearchSession.prototype.startSocketQuery_ = function() {
 		around: this.around_,
 		sort: this.sort_,
 	};
-	var query = this.connection_.buildQuery(this.query_, queryOpts);
+	var query = this.connection_.buildQuery(this.stripMapZoom(this.query_), queryOpts);
 
 	this.socket_ = new WebSocket(this.socketUri_.toString());
 	this.socket_.onopen = function() {

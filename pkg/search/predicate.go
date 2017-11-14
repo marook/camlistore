@@ -110,6 +110,7 @@ func init() {
 	registerKeyword(newFormat())
 	registerKeyword(newTag())
 	registerKeyword(newTitle())
+	registerKeyword(newRef())
 
 	// Image predicates
 	registerKeyword(newIsImage())
@@ -128,6 +129,7 @@ func init() {
 
 	// Location predicates
 	registerKeyword(newHasLocation())
+	registerKeyword(newNamedLocation())
 	registerKeyword(newLocation())
 
 	// People predicates
@@ -147,7 +149,7 @@ func (me matchEqual) Match(a atom) (bool, error) {
 }
 
 // Helper implementation for mixing into keyword implementations
-// that match only the beginning of the keyword, and get their paramertes from
+// that match only the beginning of the keyword, and get their parameters from
 // the rest, i.e. 'width:' for searches like 'width:100-200'.
 type matchPrefix struct {
 	prefix string
@@ -422,6 +424,24 @@ func (t title) Predicate(ctx context.Context, args []string) (*Constraint, error
 	return c, nil
 }
 
+type ref struct {
+	matchPrefix
+}
+
+func newRef() keyword {
+	return ref{newMatchPrefix("ref")}
+}
+
+func (r ref) Description() string {
+	return "match nodes whose blobRef starts with the given substring"
+}
+
+func (r ref) Predicate(ctx context.Context, args []string) (*Constraint, error) {
+	return &Constraint{
+		BlobRefPrefix: args[0],
+	}, nil
+}
+
 // Image predicates
 
 type isImage struct {
@@ -554,29 +574,22 @@ func (h height) Predicate(ctx context.Context, args []string) (*Constraint, erro
 
 // Location predicates
 
-type location struct {
+// namedLocation matches e.g. `loc:Paris` or `loc:"New York, New York"` queries.
+type namedLocation struct {
 	matchPrefix
 }
 
-func newLocation() keyword {
-	return location{newMatchPrefix("loc")}
+func newNamedLocation() keyword {
+	return namedLocation{newMatchPrefix("loc")}
 }
 
-func (l location) Description() string {
+func (l namedLocation) Description() string {
 	return "matches images and permanodes having a location near\n" +
 		"the specified location.  Locations are resolved using\n" +
 		"maps.googleapis.com. For example: loc:\"new york, new york\" "
 }
 
-func (l location) Predicate(ctx context.Context, args []string) (*Constraint, error) {
-	where := args[0]
-	rects, err := geocode.Lookup(ctx, where)
-	if err != nil {
-		return nil, err
-	}
-	if len(rects) == 0 {
-		return nil, fmt.Errorf("No location found for %q", where)
-	}
+func locationPredicate(ctx context.Context, rects []geocode.Rect) (*Constraint, error) {
 	var c *Constraint
 	for i, rect := range rects {
 		loc := &LocationConstraint{
@@ -597,6 +610,64 @@ func (l location) Predicate(ctx context.Context, args []string) (*Constraint, er
 		}
 	}
 	return c, nil
+}
+
+func (l namedLocation) Predicate(ctx context.Context, args []string) (*Constraint, error) {
+	where := args[0]
+	rects, err := geocode.Lookup(ctx, where)
+	if err != nil {
+		return nil, err
+	}
+	if len(rects) == 0 {
+		return nil, fmt.Errorf("No location found for %q", where)
+	}
+	return locationPredicate(ctx, rects)
+}
+
+// location matches "locrect:N,W,S,E" queries.
+type location struct {
+	matchPrefix
+}
+
+func newLocation() keyword {
+	return location{newMatchPrefix("locrect")}
+}
+
+func (l location) Description() string {
+	return "matches images and permanodes having a location within\n" +
+		"the specified location area. The area is defined by its\n " +
+		"North-West corner, followed and comma-separated by its\n " +
+		"South-East corner. Each corner is defined by its latitude,\n " +
+		"followed and comma-separated by its longitude."
+}
+
+func (l location) Predicate(ctx context.Context, args []string) (*Constraint, error) {
+	where := args[0]
+	coords := strings.Split(where, ",")
+	if len(coords) != 4 {
+		return nil, fmt.Errorf("got %d coordinates for location area, expected 4", len(coords))
+	}
+	asFloat := make([]float64, 4)
+	for k, v := range coords {
+		coo, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return nil, fmt.Errorf("could not convert location area coordinate as a float: %v", err)
+		}
+		asFloat[k] = coo
+	}
+	rects := []geocode.Rect{
+		{
+			NorthEast: geocode.LatLong{
+				Lat:  asFloat[0],
+				Long: asFloat[3],
+			},
+			SouthWest: geocode.LatLong{
+				Lat:  asFloat[2],
+				Long: asFloat[1],
+			},
+		},
+	}
+	return locationPredicate(ctx, rects)
 }
 
 type hasLocation struct {

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"reflect"
@@ -51,6 +52,12 @@ const (
 	CreatedDesc
 	CreatedAsc
 	BlobRefAsc
+	// MapSort requests that any limited search results are optimized
+	// for rendering on a map. If there are fewer matches than the
+	// requested limit, no results are pruned. When limiting results,
+	// MapSort prefers results spread around the map before clustering
+	// items too tightly.
+	MapSort
 	maxSortType
 )
 
@@ -61,6 +68,7 @@ var sortName = map[SortType][]byte{
 	CreatedDesc:      []byte(`"-created"`),
 	CreatedAsc:       []byte(`"created"`),
 	BlobRefAsc:       []byte(`"blobref"`),
+	MapSort:          []byte(`"map"`),
 }
 
 func (t SortType) MarshalJSON() ([]byte, error) {
@@ -238,6 +246,9 @@ func (q *SearchQuery) checkValid(ctx context.Context) (sq *SearchQuery, err erro
 	if q.Continue != "" && q.Around.Valid() {
 		return nil, errors.New("Continue and Around parameters are mutually exclusive")
 	}
+	if q.Sort == MapSort && (q.Continue != "" || q.Around.Valid()) {
+		return nil, errors.New("Continue or Around parameters are not available with MapSort")
+	}
 	if q.Constraint == nil {
 		if expr := q.Expression; expr != "" {
 			sq, err := parseExpression(ctx, expr)
@@ -258,6 +269,11 @@ func (q *SearchQuery) checkValid(ctx context.Context) (sq *SearchQuery, err erro
 type SearchResult struct {
 	Blobs    []*SearchResultBlob `json:"blobs"`
 	Describe *DescribeResponse   `json:"description"`
+
+	// LocationArea is non-nil if the search result mentioned any location terms. It
+	// is the bounds of the locations of the matched permanodes, for the permanodes
+	// with locations.
+	LocationArea *camtypes.LocationBounds
 
 	// Continue optionally specifies the continuation token to to
 	// continue fetching results in this result set, if interrupted
@@ -836,6 +852,13 @@ type search struct {
 	// We assume (at least so far) that only 1 goroutine is used
 	// for a given search, so anything can use this.
 	ss []string // scratch
+
+	// loc is a cache of calculated locations.
+	//
+	// TODO: if location-of-permanode were cheaper and cached in
+	// the corpus instead, then we wouldn't need this. And then
+	// searches would be faster anyway. This is a hack.
+	loc map[blob.Ref]camtypes.Location
 }
 
 func (s *search) blobMeta(ctx context.Context, br blob.Ref) (camtypes.BlobMeta, error) {
@@ -861,7 +884,22 @@ func optimizePlan(c *Constraint) *Constraint {
 	return c
 }
 
-func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
+var debugQuerySpeed, _ = strconv.ParseBool(os.Getenv("CAMLI_DEBUG_QUERY_SPEED"))
+
+func (h *Handler) Query(rawq *SearchQuery) (ret_ *SearchResult, _ error) {
+	if debugQuerySpeed {
+		t0 := time.Now()
+		jq, _ := json.Marshal(rawq)
+		log.Printf("Start %v, Doing search %s... ", t0.Format(time.RFC3339), jq)
+		defer func() {
+			d := time.Since(t0)
+			if ret_ != nil {
+				log.Printf("Start %v + %v = %v results", t0.Format(time.RFC3339), d, len(ret_.Blobs))
+			} else {
+				log.Printf("Start %v + %v = error")
+			}
+		}()
+	}
 	ctx := context.TODO() // TODO: set from rawq
 	exprResult, err := rawq.checkValid(ctx)
 	if err != nil {
@@ -873,6 +911,7 @@ func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
 		h:   h,
 		q:   q,
 		res: res,
+		loc: make(map[blob.Ref]camtypes.Location),
 	}
 
 	h.index.RLock()
@@ -883,41 +922,46 @@ func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
 
 	corpus := h.corpus
 
-	ch := make(chan camtypes.BlobMeta, buffered)
-	errc := make(chan error, 1)
-
 	cands := q.pickCandidateSource(s)
 	if candSourceHook != nil {
 		candSourceHook(cands.name)
 	}
-
-	sendCtx, cancelSend := context.WithCancel(ctx)
-	defer cancelSend()
-	go func() { errc <- cands.send(sendCtx, s, ch) }()
 
 	wantAround, foundAround := false, false
 	if q.Around.Valid() {
 		wantAround = true
 	}
 	blobMatches := q.Constraint.matcher()
-	for meta := range ch {
+
+	var enumErr error
+	cands.send(ctx, s, func(meta camtypes.BlobMeta) bool {
 		match, err := blobMatches(ctx, s, meta.Ref, meta)
 		if err != nil {
-			return nil, err
+			enumErr = err
+			return false
 		}
 		if match {
 			res.Blobs = append(res.Blobs, &SearchResultBlob{
 				Blob: meta.Ref,
 			})
+			if q.Sort == MapSort {
+				// We need all the matching blobs to apply the MapSort selection afterwards, so
+				// we temporarily ignore the limit.
+				// TODO(mpl): the above means that we also ignore Continue and Around here. I
+				// don't think we need them for the map aspect for now though.
+				return true
+			}
 			if q.Limit <= 0 || !cands.sorted {
-				continue
+				if wantAround && !foundAround && q.Around == meta.Ref {
+					foundAround = true
+				}
+				return true
 			}
 			if !wantAround || foundAround {
 				if len(res.Blobs) == q.Limit {
-					cancelSend()
-					break
+					return false
 				}
-				continue
+				return true
 			}
 			if q.Around == meta.Ref {
 				foundAround = true
@@ -934,27 +978,30 @@ func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
 					res.Blobs = res.Blobs[discard:]
 				}
 				if len(res.Blobs) == q.Limit {
-					cancelSend()
-					break
+					return false
 				}
-				continue
+				return true
 			}
 			if len(res.Blobs) == q.Limit {
 				n := copy(res.Blobs, res.Blobs[len(res.Blobs)/2:])
 				res.Blobs = res.Blobs[:n]
 			}
 		}
+		return true
+	})
+	if enumErr != nil {
+		return nil, enumErr
 	}
-	if err := <-errc; err != nil && err != context.Canceled {
-		return nil, err
-	}
-	if q.Limit > 0 && cands.sorted && wantAround && !foundAround {
+	if wantAround && !foundAround {
 		// results are ignored if Around was not found
 		res.Blobs = nil
 	}
 	if !cands.sorted {
 		switch q.Sort {
-		case UnspecifiedSort, Unsorted:
+		// TODO(mpl): maybe someday we'll want both a sort, and then the MapSort
+		// selection, as MapSort is technically not really a sort. In which case, MapSort
+		// should probably become e.g. another field of SearchQuery.
+		case UnspecifiedSort, Unsorted, MapSort:
 			// Nothing to do.
 		case BlobRefAsc:
 			sort.Sort(sortSearchResultBlobs{res.Blobs, func(a, b *SearchResultBlob) bool {
@@ -994,14 +1041,56 @@ func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
 		default:
 			return nil, errors.New("TODO: unsupported sort+query combination.")
 		}
-		if q.Limit > 0 && len(res.Blobs) > q.Limit {
-			res.Blobs = res.Blobs[:q.Limit]
+		if q.Sort != MapSort {
+			if q.Limit > 0 && len(res.Blobs) > q.Limit {
+				if wantAround {
+					aroundPos := sort.Search(len(res.Blobs), func(i int) bool {
+						return res.Blobs[i].Blob.String() >= q.Around.String()
+					})
+					// If we got this far, we know q.Around is in the results, so this below should
+					// never happen
+					if aroundPos == len(res.Blobs) || res.Blobs[aroundPos].Blob != q.Around {
+						panic("q.Around blobRef should be in the results")
+					}
+					lowerBound := aroundPos - q.Limit/2
+					if lowerBound < 0 {
+						lowerBound = 0
+					}
+					upperBound := lowerBound + q.Limit
+					if upperBound > len(res.Blobs) {
+						upperBound = len(res.Blobs)
+					}
+					res.Blobs = res.Blobs[lowerBound:upperBound]
+				} else {
+					res.Blobs = res.Blobs[:q.Limit]
+				}
+			}
 		}
 	}
 	if corpus != nil {
 		if !wantAround {
 			q.setResultContinue(corpus, res)
 		}
+	}
+
+	// Populate s.res.LocationArea
+	{
+		var la camtypes.LocationBounds
+		for _, v := range res.Blobs {
+			br := v.Blob
+			loc, ok := s.loc[br]
+			if !ok {
+				continue
+			}
+			la = la.Expand(loc)
+		}
+		if la != (camtypes.LocationBounds{}) {
+			s.res.LocationArea = &la
+		}
+	}
+
+	if q.Sort == MapSort {
+		bestByLocation(s.res, s.loc, q.Limit)
 	}
 
 	if q.Describe != nil {
@@ -1011,13 +1100,125 @@ func (h *Handler) Query(rawq *SearchQuery) (*SearchResult, error) {
 			blobs = append(blobs, srb.Blob)
 		}
 		q.Describe.BlobRefs = blobs
+		t0 := time.Now()
 		res, err := s.h.DescribeLocked(ctx, q.Describe)
+		log.Printf("Describe of %d blobs = %v", len(blobs), time.Since(t0))
 		if err != nil {
 			return nil, err
 		}
 		s.res.Describe = res
 	}
+
 	return s.res, nil
+}
+
+// bestByLocation conditionally modifies res.Blobs if the number of blobs
+// is greater than limit. If so, it modifies res.Blobs so only `limit`
+// blobs remain, selecting those such that the results are evenly spread
+// over the result's map area.
+//
+// The algorithm is the following:
+// 1) We know the size and position of the relevant area because
+// res.LocationArea was built during blob matching
+// 2) We divide the area in a grid of ~sqrt(limit) lines and columns, which is
+// represented by a map[camtypes.LocationBounds][]blob.Ref
+// 3) For each described blobRef we place it in the cell matching its location.
+// Each cell is bounded by limit though.
+// 4) We compute the max number of nodes per cell:
+// N = (number of non empty cells) / limit
+// 5) for each cell, append to the set of selected nodes the first N nodes of
+// the cell.
+func bestByLocation(res *SearchResult, locm map[blob.Ref]camtypes.Location, limit int) {
+	// Calculate res.LocationArea.
+	if len(res.Blobs) <= limit {
+		return
+	}
+
+	if res.LocationArea == nil {
+		// No even one result node with a location was found.
+		return
+	}
+	area := res.LocationArea
+	// divide location area in a grid of ~limit cells, such as each cell is of the
+	// same proportion as the location area, i.e. equal number of lines and columns.
+	grid := make(map[camtypes.LocationBounds][]blob.Ref)
+	areaHeight := area.North - area.South
+	areaWidth := area.East - area.West
+	if area.West >= area.East {
+		// area is spanning over the antimeridian
+		areaWidth += 360
+	}
+	nbLines := math.Sqrt(float64(limit))
+	cellLat := areaHeight / nbLines
+	cellLong := areaWidth / nbLines
+	latZero := area.North
+	longZero := area.West
+
+	for _, v := range res.Blobs {
+		br := v.Blob
+		loc, ok := locm[br]
+		if !ok {
+			continue
+		}
+
+		relLat := latZero - loc.Latitude
+		relLong := loc.Longitude - longZero
+		if loc.Longitude < longZero {
+			// area is spanning over the antimeridian
+			relLong += 360
+		}
+		line := int(relLat / cellLat)
+		col := int(relLong / cellLong)
+		cellKey := camtypes.LocationBounds{
+			North: latZero - float64(line)*cellLat,
+			West:  camtypes.Longitude(longZero + float64(col)*cellLong).WrapTo180(),
+			South: latZero - float64(line+1)*cellLat,
+			East:  camtypes.Longitude(longZero + float64(col+1)*cellLong).WrapTo180(),
+		}
+
+		var brs []blob.Ref
+		cell, ok := grid[cellKey]
+		if !ok {
+			// cell does not exist yet.
+			brs = []blob.Ref{br}
+		} else {
+			if len(cell) >= limit {
+				// no sense in filling a cell to more than our overall limit
+				continue
+			}
+			brs = append(cell, br)
+		}
+		grid[cellKey] = brs
+	}
+
+	maxNodesPerCell := limit / len(grid)
+	if len(grid) > limit {
+		maxNodesPerCell = 1
+	}
+	var nodesKept []*SearchResultBlob
+	for _, v := range grid {
+		var brs []blob.Ref
+		if len(v) <= maxNodesPerCell {
+			brs = v
+		} else {
+			// TODO(mpl): remove the nodes that are the most clustered within a cell. For
+			// now simply do first found first picked, for each cell.
+			brs = v[:maxNodesPerCell]
+		}
+		for _, br := range brs {
+			// TODO(mpl): if grid was instead a
+			// map[camtypes.LocationBounds][]*SearchResultBlob from the start, then here we
+			// could instead do nodesKept = append(nodesKept, brs...), but I'm not sure that's a win?
+			nodesKept = append(nodesKept, &SearchResultBlob{
+				Blob: br,
+			})
+		}
+	}
+	res.Blobs = nodesKept
+	// TODO(mpl): we do not trim the described blobs, because some of the described
+	// are children of the kept blobs, and we wouldn't know whether to remove them or
+	// not. If we do care about the size of res.Describe, I suppose we should reissue a
+	// describe query on nodesKept.
 }
 
 // setResultContinue sets res.Continue if q is suitable for having a continue token.
@@ -1061,8 +1262,11 @@ func anyCamliType(ctx context.Context, s *search, br blob.Ref, bm camtypes.BlobM
 	return bm.CamliType != "", nil
 }
 
-// Test hook.
-var candSourceHook func(string)
+// Test hooks.
+var (
+	candSourceHook     func(string)
+	expandLocationHook bool
+)
 
 type candidateSource struct {
 	name   string
@@ -1070,7 +1274,7 @@ type candidateSource struct {
 
 	// sends sends to the channel and must close it, regardless of error
 	// or interruption from context.Done().
-	send func(context.Context, *search, chan<- camtypes.BlobMeta) error
+	send func(context.Context, *search, func(camtypes.BlobMeta) bool) error
 }
 
 func (q *SearchQuery) pickCandidateSource(s *search) (src candidateSource) {
@@ -1082,14 +1286,16 @@ func (q *SearchQuery) pickCandidateSource(s *search) (src candidateSource) {
 			switch q.Sort {
 			case LastModifiedDesc:
 				src.name = "corpus_permanode_lastmod"
-				src.send = func(ctx context.Context, s *search, dst chan<- camtypes.BlobMeta) error {
-					return corpus.EnumeratePermanodesLastModified(ctx, dst)
+				src.send = func(ctx context.Context, s *search, fn func(camtypes.BlobMeta) bool) error {
+					corpus.EnumeratePermanodesLastModified(fn)
+					return nil
 				}
 				return
 			case CreatedDesc:
 				src.name = "corpus_permanode_created"
-				src.send = func(ctx context.Context, s *search, dst chan<- camtypes.BlobMeta) error {
-					return corpus.EnumeratePermanodesCreated(ctx, dst, true)
+				src.send = func(ctx context.Context, s *search, fn func(camtypes.BlobMeta) bool) error {
+					corpus.EnumeratePermanodesCreated(fn, true)
+					return nil
 				}
 				return
 			default:
@@ -1099,23 +1305,25 @@ func (q *SearchQuery) pickCandidateSource(s *search) (src candidateSource) {
 		// fastpath for files
 		if c.matchesFileByWholeRef() {
 			src.name = "corpus_file_meta"
-			src.send = func(ctx context.Context, s *search, dst chan<- camtypes.BlobMeta) error {
-				return corpus.EnumerateCamliBlobs(ctx, "file", dst)
+			src.send = func(ctx context.Context, s *search, fn func(camtypes.BlobMeta) bool) error {
+				corpus.EnumerateCamliBlobs("file", fn)
+				return nil
 			}
 			return
 		}
 		if c.AnyCamliType || c.CamliType != "" {
 			camType := c.CamliType // empty means all
 			src.name = "corpus_blob_meta"
-			src.send = func(ctx context.Context, s *search, dst chan<- camtypes.BlobMeta) error {
-				return corpus.EnumerateCamliBlobs(ctx, camType, dst)
+			src.send = func(ctx context.Context, s *search, fn func(camtypes.BlobMeta) bool) error {
+				corpus.EnumerateCamliBlobs(camType, fn)
+				return nil
 			}
 			return
 		}
 	}
 	src.name = "index_blob_meta"
-	src.send = func(ctx context.Context, s *search, dst chan<- camtypes.BlobMeta) error {
-		return s.h.index.EnumerateBlobMeta(ctx, dst)
+	src.send = func(ctx context.Context, s *search, fn func(camtypes.BlobMeta) bool) error {
+		return s.h.index.EnumerateBlobMeta(ctx, fn)
 	}
 	return
 }
@@ -1413,6 +1621,7 @@ func (c *PermanodeConstraint) blobMatches(ctx context.Context, s *search, br blo
 		if !c.Location.matchesLatLong(l.Latitude, l.Longitude) {
 			return false, nil
 		}
+		s.loc[br] = l
 	}
 
 	if cc := c.Continue; cc != nil {
@@ -1520,7 +1729,7 @@ func (c *FileConstraint) checkValid() error {
 	return nil
 }
 
-func (c *FileConstraint) blobMatches(ctx context.Context, s *search, br blob.Ref, bm camtypes.BlobMeta) (bool, error) {
+func (c *FileConstraint) blobMatches(ctx context.Context, s *search, br blob.Ref, bm camtypes.BlobMeta) (ok bool, err error) {
 	if bm.CamliType != "file" {
 		return false, nil
 	}
@@ -1591,10 +1800,24 @@ func (c *FileConstraint) blobMatches(ctx context.Context, s *search, br blob.Ref
 		if corpus == nil {
 			return false, nil
 		}
-		lat, long, ok := corpus.FileLatLong(br)
-		if !ok || !c.Location.matchesLatLong(lat, long) {
+		lat, long, found := corpus.FileLatLong(br)
+		if !found || !c.Location.matchesLatLong(lat, long) {
 			return false, nil
 		}
+		// If location was successfully matched, add the
+		// location to the global location area of results so
+		// a sort-by-map doesn't need to look it up again
+		// later.
+		s.loc[br] = camtypes.Location{
+			Latitude:  lat,
+			Longitude: long,
+		}
+	}
+	// this makes sure, in conjunction with TestQueryFileLocation, that we only
+	// expand the location iff the location matched AND the whole constraint matched as
+	// well.
+	if expandLocationHook {
+		return false, nil
 	}
 	if mt := c.MediaTag; mt != nil {
 		if corpus == nil {
@@ -1613,7 +1836,7 @@ func (c *FileConstraint) blobMatches(ctx context.Context, s *search, br blob.Ref
 			return false, nil
 		}
 	}
-	// TOOD: EXIF timeconstraint
+	// TODO: EXIF timeconstraint
 	return true, nil
 }
 
