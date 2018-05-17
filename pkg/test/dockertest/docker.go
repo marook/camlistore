@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Camlistore Authors
+Copyright 2014 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ limitations under the License.
 /*
 Package dockertest contains helper functions for setting up and tearing down docker containers to aid in testing.
 */
-package dockertest // import "camlistore.org/pkg/test/dockertest"
+package dockertest // import "perkeep.org/pkg/test/dockertest"
 
 import (
 	"bytes"
@@ -35,10 +35,10 @@ import (
 	"testing"
 	"time"
 
-	"camlistore.org/pkg/netutil"
+	"perkeep.org/internal/netutil"
 )
 
-// Debug, if set, prevents any container from being removed.
+// Debug when set, prevents any container from being removed.
 var Debug bool
 
 /// runLongTest checks all the conditions for running a docker container
@@ -271,7 +271,7 @@ func setupContainer(t *testing.T, image string, port int, timeout time.Duration,
 
 const (
 	mongoImage       = "mpl7/mongo"
-	mysqlImage       = "mysql"
+	mysqlImage       = "mysql:5"
 	MySQLUsername    = "root"
 	MySQLPassword    = "root"
 	postgresImage    = "nornagon/postgres"

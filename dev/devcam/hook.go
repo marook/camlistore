@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Camlistore Authors.
+Copyright 2015 The Perkeep Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import (
 	"sort"
 	"strings"
 
-	"camlistore.org/pkg/cmdmain"
+	"perkeep.org/pkg/cmdmain"
 )
 
 var hookPath = ".git/hooks/"
@@ -85,7 +85,7 @@ type hookCmd struct {
 }
 
 func init() {
-	cmdmain.RegisterCommand("hook", func(flags *flag.FlagSet) cmdmain.CommandRunner {
+	cmdmain.RegisterMode("hook", func(flags *flag.FlagSet) cmdmain.CommandRunner {
 		cmd := &hookCmd{}
 		flags.BoolVar(&cmd.verbose, "verbose", false, "Be verbose.")
 		// TODO(mpl): "-w" flag to run gofmt -w and devcam fixv -w. for now just print instruction.
@@ -105,7 +105,7 @@ func (c *hookCmd) Examples() []string {
 }
 
 func (c *hookCmd) Describe() string {
-	return "Install git hooks for Camlistore, and if given, run the hook given as argument. Currently available hooks are: " + strings.TrimSuffix(strings.Join(hookFiles, ", "), ",") + "."
+	return "Install git hooks for Perkeep, and if given, run the hook given as argument. Currently available hooks are: " + strings.TrimSuffix(strings.Join(hookFiles, ", "), ",") + "."
 }
 
 func (c *hookCmd) RunCommand(args []string) error {
@@ -148,7 +148,7 @@ func stripComments(in []byte) []byte {
 // Code mostly copied from golang.org/x/review/git-codereview/hook.go
 func (c *hookCmd) hookCommitMsg(args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: devcam hook commit-msg message.txt\n")
+		return errors.New("usage: devcam hook commit-msg message.txt")
 	}
 
 	file := args[0]
@@ -240,7 +240,7 @@ func (c *hookCmd) hookTrailingSpace() error {
 	if out != "" {
 		printf("\n%s", out)
 		printf("Trailing whitespace detected, you need to clean it up manually.\n")
-		return errors.New("trailing whitespace.")
+		return errors.New("trailing whitespace")
 	}
 	return nil
 }
@@ -335,6 +335,10 @@ func filter(f func(string) bool, list []string) []string {
 // The file name is relative to the repo root.
 func gofmtRequired(file string) bool {
 	if !strings.HasSuffix(file, ".go") {
+		return false
+	}
+	// vendor files should be imported as-is
+	if strings.HasPrefix(file, "vendor/") {
 		return false
 	}
 	if !strings.HasPrefix(file, "test/") {

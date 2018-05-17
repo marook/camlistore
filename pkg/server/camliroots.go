@@ -37,14 +37,14 @@ import (
 	"strings"
 	"time"
 
-	"camlistore.org/pkg/auth"
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"camlistore.org/pkg/client"
-	"camlistore.org/pkg/httputil"
-	"camlistore.org/pkg/magic"
-	"camlistore.org/pkg/schema"
-	"camlistore.org/pkg/search"
+	"perkeep.org/pkg/auth"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
+	"perkeep.org/pkg/client"
+	"perkeep.org/internal/httputil"
+	"perkeep.org/internal/magic"
+	"perkeep.org/pkg/schema"
+	"perkeep.org/pkg/search"
 
 	"go4.org/jsonconfig"
 	"golang.org/x/net/context"
@@ -177,7 +177,7 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 }
 
 func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
-	rootRes, err := camliRoots.client.GetPermanodesWithAttr(&search.WithAttrRequest{N: 100, Attr: "camliRoot"})
+	rootRes, err := camliRoots.client.GetPermanodesWithAttr(context.TODO(), &search.WithAttrRequest{N: 100, Attr: "camliRoot"})
 	if err != nil {
 		http.Error(rw, "Server error", http.StatusInternalServerError)
 		return nil, err
@@ -279,7 +279,7 @@ func (camliRootsHandler *CamliRootsHandler) fileInfo(req *http.Request, file blo
 	if ok {
 		return fi, nil
 	}
-	fr, err := schema.NewFileReader(camliRootsHandler.Fetcher, file)
+	fr, err := schema.NewFileReader(context.TODO(), camliRootsHandler.Fetcher, file)
 	if err != nil {
 		return
 	}

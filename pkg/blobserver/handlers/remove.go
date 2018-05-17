@@ -1,5 +1,5 @@
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,20 +17,21 @@ limitations under the License.
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"camlistore.org/pkg/httputil"
+	"perkeep.org/internal/httputil"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
 )
 
 const maxRemovesPerRequest = 1000
 
 func CreateRemoveHandler(storage blobserver.Storage) http.Handler {
-	return http.HandlerFunc(func(conn http.ResponseWriter, req *http.Request) {
-		handleRemove(conn, req, storage)
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		handleRemove(rw, req, storage)
 	})
 }
 
@@ -40,6 +41,7 @@ type RemoveResponse struct {
 }
 
 func handleRemove(rw http.ResponseWriter, req *http.Request, storage blobserver.Storage) {
+	ctx := context.TODO()
 	if req.Method != "POST" {
 		log.Fatalf("Invalid method; handlers misconfigured")
 	}
@@ -78,7 +80,7 @@ func handleRemove(rw http.ResponseWriter, req *http.Request, storage blobserver.
 		toRemove = append(toRemove, ref)
 	}
 
-	err := storage.RemoveBlobs(toRemove)
+	err := storage.RemoveBlobs(ctx, toRemove)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
 		log.Printf("Server error during remove: %v", err)

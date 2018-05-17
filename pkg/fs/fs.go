@@ -1,7 +1,7 @@
 // +build linux darwin
 
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,11 +16,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package fs implements a FUSE filesystem for Camlistore and is
-// used by the cammount binary.
-package fs // import "camlistore.org/pkg/fs"
+// Package fs implements a FUSE filesystem for Perkeep and is
+// used by the pk-mount binary.
+package fs // import "perkeep.org/pkg/fs"
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -28,14 +29,13 @@ import (
 	"sync"
 	"time"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/client"
-	"camlistore.org/pkg/lru"
-	"camlistore.org/pkg/schema"
+	"perkeep.org/internal/lru"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/client"
+	"perkeep.org/pkg/schema"
 
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
-	"golang.org/x/net/context"
 )
 
 var serverStart = time.Now()
@@ -164,7 +164,7 @@ func (n *node) schema() (*schema.Blob, error) {
 	if n.meta != nil {
 		return n.meta, nil
 	}
-	blob, err := n.fs.fetchSchemaMeta(n.blobref)
+	blob, err := n.fs.fetchSchemaMeta(context.TODO(), n.blobref)
 	if err == nil {
 		n.meta = blob
 		n.populateAttr()
@@ -253,12 +253,12 @@ func (n *node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		log.Printf("camli.ReadDirAll error on %v: %v", n.blobref, err)
 		return nil, fuse.EIO
 	}
-	dr, err := schema.NewDirReader(n.fs.fetcher, ss.BlobRef())
+	dr, err := schema.NewDirReader(ctx, n.fs.fetcher, ss.BlobRef())
 	if err != nil {
 		log.Printf("camli.ReadDirAll error on %v: %v", n.blobref, err)
 		return nil, fuse.EIO
 	}
-	schemaEnts, err := dr.Readdir(-1)
+	schemaEnts, err := dr.Readdir(ctx, -1)
 	if err != nil {
 		log.Printf("camli.ReadDirAll error on %v: %v", n.blobref, err)
 		return nil, fuse.EIO
@@ -334,13 +334,13 @@ func (fs *CamliFileSystem) Statfs(ctx context.Context, req *fuse.StatfsRequest, 
 // Errors returned are:
 //    os.ErrNotExist -- blob not found
 //    os.ErrInvalid -- not JSON or a camli schema blob
-func (fs *CamliFileSystem) fetchSchemaMeta(br blob.Ref) (*schema.Blob, error) {
+func (fs *CamliFileSystem) fetchSchemaMeta(ctx context.Context, br blob.Ref) (*schema.Blob, error) {
 	blobStr := br.String()
 	if blob, ok := fs.blobToSchema.Get(blobStr); ok {
 		return blob.(*schema.Blob), nil
 	}
 
-	rc, _, err := fs.fetcher.Fetch(br)
+	rc, _, err := fs.fetcher.Fetch(ctx, br)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +360,7 @@ func (fs *CamliFileSystem) fetchSchemaMeta(br blob.Ref) (*schema.Blob, error) {
 
 // consolated logic for determining a node to mount based on an arbitrary blobref
 func (fs *CamliFileSystem) newNodeFromBlobRef(root blob.Ref) (fusefs.Node, error) {
-	blob, err := fs.fetchSchemaMeta(root)
+	blob, err := fs.fetchSchemaMeta(context.TODO(), root)
 	if err != nil {
 		return nil, err
 	}

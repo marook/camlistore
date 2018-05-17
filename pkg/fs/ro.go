@@ -1,7 +1,7 @@
 // +build linux darwin
 
 /*
-Copyright 2013 Google Inc.
+Copyright 2013 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ limitations under the License.
 package fs
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -29,11 +30,10 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/schema"
-	"camlistore.org/pkg/search"
 	"go4.org/types"
-	"golang.org/x/net/context"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/schema"
+	"perkeep.org/pkg/search"
 )
 
 // roDir is a read-only directory.
@@ -343,7 +343,7 @@ func (n *roFile) Open(ctx context.Context, req *fuse.OpenRequest, res *fuse.Open
 	}
 
 	log.Printf("roFile.Open: %v: content: %v dir=%v flags=%v", n.permanode, n.content, req.Dir, req.Flags)
-	r, err := schema.NewFileReader(n.fs.fetcher, n.content)
+	r, err := schema.NewFileReader(ctx, n.fs.fetcher, n.content)
 	if err != nil {
 		roFileOpenError.Incr()
 		log.Printf("roFile.Open: %v", err)

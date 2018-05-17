@@ -1,5 +1,5 @@
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,13 @@ limitations under the License.
 package s3
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"path"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"golang.org/x/net/context"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
 )
 
 var _ blobserver.MaxEnumerateConfig = (*s3Storage)(nil)
@@ -57,7 +57,7 @@ func (sto *s3Storage) EnumerateBlobs(ctx context.Context, dest chan<- blob.Sized
 	if _, ok := blob.Parse(after); ok {
 		startAt = nextStr(after)
 	}
-	objs, err := sto.s3Client.ListBucket(sto.bucket, sto.dirPrefix+startAt, limit)
+	objs, err := sto.s3Client.ListBucket(ctx, sto.bucket, sto.dirPrefix+startAt, limit)
 	if err != nil {
 		log.Printf("s3 ListBucket: %v", err)
 		return err
@@ -72,7 +72,7 @@ func (sto *s3Storage) EnumerateBlobs(ctx context.Context, dest chan<- blob.Sized
 		}
 		br, ok := blob.Parse(file)
 		if !ok {
-			return fmt.Errorf("non-Camlistore object named %q found in %v s3 bucket", file, sto.bucket)
+			return fmt.Errorf("non-Perkeep object named %q found in %v s3 bucket", file, sto.bucket)
 		}
 		select {
 		case dest <- blob.SizedRef{Ref: br, Size: uint32(obj.Size)}:

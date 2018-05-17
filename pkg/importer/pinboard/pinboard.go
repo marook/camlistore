@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Camlistore Authors
+Copyright 2014 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ the future provide an api that lets us query what has changed.  We
 might want to switch to that when available to make the import process
 more light-weight.
 */
-package pinboard // import "camlistore.org/pkg/importer/pinboard"
+package pinboard // import "perkeep.org/pkg/importer/pinboard"
 
 import (
 	"encoding/json"
@@ -52,10 +52,10 @@ import (
 	"strings"
 	"time"
 
-	"camlistore.org/pkg/httputil"
-	"camlistore.org/pkg/importer"
-	"camlistore.org/pkg/schema"
-	"camlistore.org/pkg/schema/nodeattr"
+	"perkeep.org/internal/httputil"
+	"perkeep.org/pkg/importer"
+	"perkeep.org/pkg/schema"
+	"perkeep.org/pkg/schema/nodeattr"
 
 	"go4.org/ctxutil"
 	"go4.org/syncutil"
@@ -93,18 +93,22 @@ func extractUsername(authToken string) string {
 	split := strings.SplitN(authToken, ":", 2)
 	if len(split) == 2 {
 		return split[0]
-	} else {
-		return ""
 	}
+	return ""
 }
 
 type imp struct {
 	importer.OAuth1 // for CallbackRequestAccount and CallbackURLParameters
 }
 
-func (imp) SupportsIncremental() bool { return false }
-
-func (imp) NeedsAPIKey() bool { return false }
+func (imp) Properties() importer.Properties {
+	return importer.Properties{
+		Title:               "Pinboard",
+		Description:         "import your pinboard.in posts",
+		SupportsIncremental: false,
+		NeedsAPIKey:         false,
+	}
+}
 
 func (imp) IsAccountReady(acct *importer.Object) (ready bool, err error) {
 	ready = acct.Attr(attrAuthToken) != ""
@@ -243,7 +247,7 @@ type apiPost struct {
 }
 
 func (r *run) importBatch(authToken string, parent *importer.Object) (keepTrying bool, err error) {
-	sleepDuration := r.nextAfter.Sub(time.Now())
+	sleepDuration := time.Until(r.nextAfter)
 	// block until we either get canceled or until it is time to run
 	select {
 	case <-r.Context().Done():
@@ -307,7 +311,7 @@ func (r *run) importBatch(authToken string, parent *importer.Object) (keepTrying
 		})
 	}
 
-	log.Printf("pinboard: Imported batch of %d posts in %s.", postCount, time.Now().Sub(start))
+	log.Printf("pinboard: Imported batch of %d posts in %s.", postCount, time.Since(start))
 
 	r.nextCursor = postBatch[postCount-1].Time
 	r.lastPause = pauseInterval

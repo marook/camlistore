@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Camlistore Authors.
+Copyright 2016 The Perkeep Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,18 +27,20 @@ import (
 	"testing"
 	"time"
 
-	"camlistore.org/pkg/osutil"
-	"camlistore.org/pkg/schema"
-	"camlistore.org/pkg/serverinit"
-	"camlistore.org/pkg/types/serverconfig"
+	"perkeep.org/internal/osutil"
+	"perkeep.org/pkg/schema"
+	"perkeep.org/pkg/serverinit"
+	"perkeep.org/pkg/types/serverconfig"
 
 	// For registering all the handler constructors needed in newTestServer
-	_ "camlistore.org/pkg/blobserver/cond"
-	_ "camlistore.org/pkg/blobserver/replica"
-	_ "camlistore.org/pkg/importer/allimporters"
-	_ "camlistore.org/pkg/search"
-	_ "camlistore.org/pkg/server"
+	_ "perkeep.org/pkg/blobserver/cond"
+	_ "perkeep.org/pkg/blobserver/replica"
+	_ "perkeep.org/pkg/importer/allimporters"
+	_ "perkeep.org/pkg/search"
+	_ "perkeep.org/pkg/server"
 )
+
+var ctxbg = context.Background()
 
 type fakeFile struct {
 	name    string
@@ -68,7 +71,7 @@ func TestUploadFile(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
-	c := New(ts.URL)
+	c := NewOrFail(OptionServer(ts.URL))
 
 	f := newFakeFile("foo.txt", "bar", time.Date(2011, 1, 28, 2, 3, 4, 0, time.Local))
 
@@ -90,11 +93,11 @@ func testUploadFile(t *testing.T, c *Client, f *fakeFile, withFileOpts bool) *sc
 	if withFileOpts {
 		opts = &FileUploadOptions{FileInfo: f}
 	}
-	bref, err := c.UploadFile(f.Name(), strings.NewReader(f.content), opts)
+	bref, err := c.UploadFile(ctxbg, f.Name(), strings.NewReader(f.content), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sb, err := c.FetchSchemaBlob(bref)
+	sb, err := c.FetchSchemaBlob(ctxbg, bref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,9 +109,9 @@ func testUploadFile(t *testing.T, c *Client, f *fakeFile, withFileOpts bool) *sc
 
 // newTestServer creates a new test server with in memory storage for use in upload tests
 func newTestServer(t *testing.T) *httptest.Server {
-	camroot, err := osutil.GoPackagePath("camlistore.org")
+	camroot, err := osutil.GoPackagePath("perkeep.org")
 	if err != nil {
-		t.Fatalf("failed to find camlistore.org GOPATH root: %v", err)
+		t.Fatalf("failed to find perkeep.org GOPATH root: %v", err)
 	}
 
 	conf := serverconfig.Config{
@@ -126,27 +129,18 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("Could not json encode config: %v", err)
 	}
 
-	// Setting CAMLI_CONFIG_DIR to avoid triggering failInTests in osutil.CamliConfigDir
+	// Setting CAMLI_CONFIG_DIR to avoid triggering failInTests in osutil.PerkeepConfigDir
 	defer os.Setenv("CAMLI_CONFIG_DIR", os.Getenv("CAMLI_CONFIG_DIR")) // restore after test
 	os.Setenv("CAMLI_CONFIG_DIR", "whatever")
 	lowConf, err := serverinit.Load(confData)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// because these two are normally consumed in camlistored.go
-	// TODO(mpl): serverinit.Load should consume these 2 as well. Once
-	// consumed, we should keep all the answers as private fields, and then we
-	// put accessors on serverinit.Config. Maybe we even stop embedding
-	// jsonconfig.Obj in serverinit.Config too, so none of those methods are
-	// accessible.
-	lowConf.OptionalBool("https", true)
-	lowConf.OptionalString("listen", "")
 
 	reindex := false
-	var context *http.Request // only used by App Engine. See handlerLoader in serverinit.go
 	hi := http.NewServeMux()
 	address := "http://" + conf.Listen
-	_, err = lowConf.InstallHandlers(hi, address, reindex, context)
+	_, err = lowConf.InstallHandlers(hi, address, reindex)
 	if err != nil {
 		t.Fatal(err)
 	}

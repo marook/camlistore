@@ -33,7 +33,6 @@ Example config:
           "handlerArgs": {
 		"origin": "/bs-remote-origin/",
 		"cache": "/bs-local-cache/",
-                "temporaryOfflineSupport": true,
 		"meta": {
 		    "file": "/home/myUser/var/camlistore/proxycache.leveldb",
 		    "type": "leveldb"
@@ -42,19 +41,13 @@ Example config:
           }
       },
 
-The following handlerArgs are possible:
-- temporaryOfflineSupport: When true proxycache will not fail if blobs
-  can't be fetched from origin because of access errors. proxycache will
-  instead act as if the requested blob does not exist. When using
-  temporary offline support blobs must never be removed from origin.
-  Default value is false.
-
 */
-package proxycache // import "camlistore.org/pkg/blobserver/proxycache"
+package proxycache // import "perkeep.org/pkg/blobserver/proxycache"
 
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -64,11 +57,10 @@ import (
 	"sync"
 	"time"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"camlistore.org/pkg/sorted"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
+	"perkeep.org/pkg/sorted"
 	"go4.org/jsonconfig"
-	"golang.org/x/net/context"
 )
 
 type BlobAccess struct {
@@ -107,13 +99,16 @@ type sto struct {
 	cache                   blobserver.Storage
 	kv                      sorted.KeyValue
 	maxCacheBytes           int64
-	temporaryOfflineSupport bool
 
 	mu             sync.Mutex // guards cacheBytes, kv and blobAccess* mutations
 	cacheBytes     int64
 	blobAccessHeap BlobAccessHeap // min heap of the blob's last access timestamps
 	blobAccessMap  map[blob.Ref]*BlobAccess
 }
+
+var (
+	_ blobserver.Storage = (*sto)(nil)
+)
 
 func init() {
 	blobserver.RegisterStorageConstructor("proxycache", blobserver.StorageConstructor(newFromConfig))
@@ -125,7 +120,6 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 		cache                   = config.RequiredString("cache")
 		kvConf                  = config.RequiredObject("meta")
 		maxCacheBytes           = config.OptionalInt64("maxCacheBytes", 512<<20)
-		temporaryOfflineSupport = config.OptionalBool("temporaryOfflineSupport", false)
 	)
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -173,10 +167,17 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (storage blobser
 		kv:                      kv,
 		blobAccessHeap:          blobAccessHeap,
 		blobAccessMap:           blobAccessMap,
-		temporaryOfflineSupport: temporaryOfflineSupport,
 	}
-	s.EnforceCacheLimits()
+	s.EnforceCacheLimits(context.TODO())
 	return s, nil
+}
+
+func New(maxCacheBytes int64, cache blobserver.Storage, origin blobserver.Storage) (storage blobserver.Storage){
+	/*
+	 * at the time of writing this function was required by the s3
+	 * blobstore.
+	 */
+	panic("proxycache without kv storage is not supported")
 }
 
 func buildBlobAccessMapFromKv(kv sorted.KeyValue) (blobAccessMap map[blob.Ref]*BlobAccess, err error) {
@@ -261,13 +262,13 @@ func rebuildKvFromCache(kv sorted.KeyValue, cache blobserver.Storage) (err error
 	return nil
 }
 
-func (sto *sto) touchBlob(sb blob.SizedRef, contentCached bool) {
+func (sto *sto) touchBlob(ctx context.Context, sb blob.SizedRef, contentCached bool) {
 	sto.mu.Lock()
 	defer sto.mu.Unlock()
-	sto.touchBlobs([]blob.SizedRef{sb}, contentCached)
+	sto.touchBlobs(ctx, []blob.SizedRef{sb}, contentCached)
 }
 
-func (sto *sto) touchBlobs(blobs []blob.SizedRef, contentCached bool) {
+func (sto *sto) touchBlobs(ctx context.Context, blobs []blob.SizedRef, contentCached bool) {
 	now := time.Now().Unix()
 	kvBatch := sto.kv.BeginBatch()
 	for _, sb := range blobs {
@@ -308,10 +309,10 @@ func (sto *sto) touchBlobs(blobs []blob.SizedRef, contentCached bool) {
 		kvBatch.Set(sb.Ref.String(), val)
 	}
 	sto.kv.CommitBatch(kvBatch)
-	sto.EnforceCacheLimits()
+	sto.EnforceCacheLimits(ctx)
 }
 
-func (sto *sto) EnforceCacheLimits() {
+func (sto *sto) EnforceCacheLimits(ctx context.Context) {
 	if sto.cacheBytes > sto.maxCacheBytes {
 		deletedRefs := []blob.Ref{}
 		kvBatch := sto.kv.BeginBatch()
@@ -324,21 +325,21 @@ func (sto *sto) EnforceCacheLimits() {
 				deletedRefs = append(deletedRefs, droppedBlobAccess.Ref)
 			}
 		}
-		sto.cache.RemoveBlobs(deletedRefs)
+		sto.cache.RemoveBlobs(ctx, deletedRefs)
 		sto.kv.CommitBatch(kvBatch)
 	}
 }
 
-func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
-	rc, size, err = sto.cache.Fetch(b)
+func (sto *sto) Fetch(ctx context.Context, b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
+	rc, size, err = sto.cache.Fetch(ctx, b)
 	if err == nil {
-		sto.touchBlob(blob.SizedRef{Ref: b, Size: size}, true)
+		sto.touchBlob(ctx, blob.SizedRef{Ref: b, Size: size}, true)
 		return
 	}
 	if err != os.ErrNotExist {
 		log.Printf("warning: proxycache cache fetch error for %v: %v", b, err)
 	}
-	rc, size, err = sto.origin.Fetch(b)
+	rc, size, err = sto.origin.Fetch(ctx, b)
 	if err != nil {
 		return
 	}
@@ -347,82 +348,66 @@ func (sto *sto) Fetch(b blob.Ref) (rc io.ReadCloser, size uint32, err error) {
 		return
 	}
 	go func() {
-		if _, err := blobserver.Receive(sto.cache, b, bytes.NewReader(all)); err != nil {
+		if _, err := blobserver.Receive(ctx, sto.cache, b, bytes.NewReader(all)); err != nil {
 			log.Printf("populating proxycache cache for %v: %v", b, err)
 			return
 		}
-		sto.touchBlob(blob.SizedRef{Ref: b, Size: size}, true)
+		sto.touchBlob(ctx, blob.SizedRef{Ref: b, Size: size}, true)
 	}()
 	return ioutil.NopCloser(bytes.NewReader(all)), size, nil
 }
 
-func (sto *sto) StatBlobs(dest chan<- blob.SizedRef, blobs []blob.Ref) error {
-	if sto.temporaryOfflineSupport {
-		sto.mu.Lock()
-		defer sto.mu.Unlock()
+func (sto *sto) StatBlobs(ctx context.Context, blobs []blob.Ref, fn func(blob.SizedRef) error) error {
+	sto.mu.Lock()
+	defer sto.mu.Unlock()
 
-		notCachedRefs := []blob.Ref{}
-		for _, ref := range blobs {
-			blobAccess, ok := sto.blobAccessMap[ref]
-			if ok {
-				dest <- blob.SizedRef{Ref: ref, Size: blobAccess.BlobSize}
-			} else {
-				notCachedRefs = append(notCachedRefs, ref)
-			}
-		}
-
-		originStats := []blob.SizedRef{}
-		if len(notCachedRefs) > 0 {
-			originStatsCh := make(chan blob.SizedRef)
-			errCh := make(chan error)
-			sto.mu.Unlock()
-			go func() {
-				errCh <- sto.origin.StatBlobs(originStatsCh, notCachedRefs)
-			}()
-			for {
-				originRef, ok := <-originStatsCh
-				if !ok {
-					break
-				}
-				originStats = append(originStats, originRef)
-				dest <- originRef
-			}
-			sto.mu.Lock()
-			err := <-errCh
-			if err != nil {
+	notCachedRefs := []blob.Ref{}
+	for _, ref := range blobs {
+		blobAccess, ok := sto.blobAccessMap[ref]
+		if ok {
+			sb := blob.SizedRef{Ref: ref, Size: blobAccess.BlobSize}
+			if err := fn(sb); err != nil {
 				return err
 			}
+		} else {
+			notCachedRefs = append(notCachedRefs, ref)
+		}
+	}
+
+	originStats := []blob.SizedRef{}
+	if len(notCachedRefs) > 0 {
+		fnproxy := func (sr blob.SizedRef) error {
+			originStats = append(originStats, sr)
+			return fn(sr)
 		}
 
-		sto.touchBlobs(originStats, false)
-
-		return nil
-	} else {
-		return sto.origin.StatBlobs(dest, blobs)
+		if err := sto.origin.StatBlobs(ctx, notCachedRefs, fnproxy); err != nil {
+			sto.mu.Lock()
+			return err
+		}
+		sto.mu.Lock()
 	}
+
+	sto.touchBlobs(ctx, originStats, false)
+
+	return nil
 }
 
-func (sto *sto) ReceiveBlob(br blob.Ref, src io.Reader) (sb blob.SizedRef, err error) {
+func (sto *sto) ReceiveBlob(ctx context.Context, br blob.Ref, src io.Reader) (sb blob.SizedRef, err error) {
 	// Slurp the whole blob before replicating. Bounded by 16 MB anyway.
 	var buf bytes.Buffer
 	if _, err = io.Copy(&buf, src); err != nil {
 		return
 	}
-	if sb, err = sto.cache.ReceiveBlob(br, bytes.NewReader(buf.Bytes())); err != nil {
+	if sb, err = sto.cache.ReceiveBlob(ctx, br, bytes.NewReader(buf.Bytes())); err != nil {
 		return
 	}
-	sto.touchBlob(sb, true)
-	return sto.origin.ReceiveBlob(br, bytes.NewReader(buf.Bytes()))
+	sto.touchBlob(ctx, sb, true)
+	return sto.origin.ReceiveBlob(ctx, br, bytes.NewReader(buf.Bytes()))
 }
 
-func (sto *sto) RemoveBlobs(blobs []blob.Ref) error {
-	if sto.temporaryOfflineSupport {
-		panic("proxycache in offline mode does not support removing blobs")
-	}
-	sto.RemoveFromCacheMetadata(blobs)
-	// Ignore result of cache removal
-	go sto.cache.RemoveBlobs(blobs)
-	return sto.origin.RemoveBlobs(blobs)
+func (sto *sto) RemoveBlobs(ctx context.Context, blobs []blob.Ref) error {
+	panic("proxycache does not support removing blobs")
 }
 
 func (sto *sto) RemoveFromCacheMetadata(blobs []blob.Ref) {

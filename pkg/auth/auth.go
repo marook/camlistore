@@ -1,5 +1,5 @@
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package auth implements Camlistore authentication.
-package auth // import "camlistore.org/pkg/auth"
+package auth // import "perkeep.org/pkg/auth"
 
 import (
 	"crypto/rand"
@@ -27,7 +27,7 @@ import (
 	"strings"
 	"sync"
 
-	"camlistore.org/pkg/httputil"
+	"perkeep.org/internal/httputil"
 )
 
 // Operation represents a bitmask of operations. See the OpX constants.
@@ -339,7 +339,7 @@ func IsLocalhost(req *http.Request) bool {
 // against am.
 func AllowedWithAuth(am AuthMode, req *http.Request, op Operation) bool {
 	if op&OpUpload != 0 {
-		// upload (at least from camput) requires stat and get too
+		// upload (at least from pk-put) requires stat and get too
 		op = op | OpVivify
 	}
 	return am.AllowedAccess(req)&op == op

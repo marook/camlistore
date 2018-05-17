@@ -1,5 +1,5 @@
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,25 +17,27 @@ limitations under the License.
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/httputil"
+	"perkeep.org/internal/httputil"
+	"perkeep.org/pkg/blob"
 )
 
 type removeResponse struct {
 	Removed []string `json:"removed"`
 }
 
-// Remove the list of blobs. An error is returned if the server failed to
-// remove a blob. Removing a non-existent blob isn't an error.
-func (c *Client) RemoveBlobs(blobs []blob.Ref) error {
+// RemoveBlobs removes the list of blobs. An error is returned if the
+// server failed to remove a blob. Removing a non-existent blob isn't
+// an error.
+func (c *Client) RemoveBlobs(ctx context.Context, blobs []blob.Ref) error {
 	if c.sto != nil {
-		return c.sto.RemoveBlobs(blobs)
+		return c.sto.RemoveBlobs(ctx, blobs)
 	}
 	pfx, err := c.prefix()
 	if err != nil {
@@ -57,6 +59,7 @@ func (c *Client) RemoveBlobs(blobs []blob.Ref) error {
 	if err != nil {
 		return fmt.Errorf("Error creating RemoveBlobs POST request: %v", err)
 	}
+	req = req.WithContext(ctx)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	c.authMode.AddAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
@@ -81,15 +84,15 @@ func (c *Client) RemoveBlobs(blobs []blob.Ref) error {
 	return nil
 }
 
-// Remove the single blob. An error is returned if the server failed to remove
+// RemoveBlob removes the provided blob. An error is returned if the server failed to remove
 // the blob. Removing a non-existent blob isn't an error.
-func (c *Client) RemoveBlob(b blob.Ref) error {
-	return c.RemoveBlobs([]blob.Ref{b})
+func (c *Client) RemoveBlob(ctx context.Context, b blob.Ref) error {
+	return c.RemoveBlobs(ctx, []blob.Ref{b})
 }
 
 func stringKeys(m map[string]bool) (s []string) {
 	s = make([]string, 0, len(m))
-	for key, _ := range m {
+	for key := range m {
 		s = append(s, key)
 	}
 	return

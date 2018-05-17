@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Camlistore Authors
+Copyright 2014 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package s3
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"flag"
 	"io"
@@ -29,13 +30,12 @@ import (
 	"testing"
 	"time"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"camlistore.org/pkg/blobserver/storagetest"
-	"camlistore.org/pkg/schema"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
+	"perkeep.org/pkg/blobserver/storagetest"
+	"perkeep.org/pkg/schema"
 
 	"go4.org/jsonconfig"
-	"golang.org/x/net/context"
 )
 
 var (
@@ -44,6 +44,8 @@ var (
 	bucket       = flag.String("s3_bucket", "", "Bucket name to use for testing. If empty, testing is skipped. If non-empty, it must begin with 'camlistore-' and end in '-test' and have zero items in it.")
 	flagTestData = flag.String("testdata", "", "Optional directory containing some files to write to the bucket, for additional tests.")
 )
+
+var ctxbg = context.Background()
 
 func TestS3(t *testing.T) {
 	testStorage(t, "")
@@ -77,7 +79,7 @@ func TestS3WriteFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer f.Close() // assuming there aren't that many files.
-		if _, err := schema.WriteFileFromReaderWithModTime(sto, name, time.Now(), f); err != nil {
+		if _, err := schema.WriteFileFromReaderWithModTime(ctxbg, sto, name, time.Now(), f); err != nil {
 			t.Fatalf("Error while writing %v to S3: %v", name, err)
 		}
 		t.Logf("Wrote %v successfully to S3", name)
@@ -116,7 +118,7 @@ func testStorage(t *testing.T, bucketDir string) {
 				if err != nil {
 					t.Fatalf("could not insert object %s in bucket %v: %v", key, sto.(*s3Storage).bucket, err)
 				}
-				if err := sto.(*s3Storage).s3Client.PutObject(
+				if err := sto.(*s3Storage).s3Client.PutObject(ctxbg,
 					key, sto.(*s3Storage).bucket, md5h, size, &buf); err != nil {
 					t.Fatalf("could not insert object %s in bucket %v: %v", key, sto.(*s3Storage).bucket, err)
 				}
@@ -125,12 +127,12 @@ func testStorage(t *testing.T, bucketDir string) {
 		clearBucket := func(beforeTests bool) func() {
 			return func() {
 				var all []blob.Ref
-				blobserver.EnumerateAll(context.TODO(), sto, func(sb blob.SizedRef) error {
+				blobserver.EnumerateAll(ctxbg, sto, func(sb blob.SizedRef) error {
 					t.Logf("Deleting: %v", sb.Ref)
 					all = append(all, sb.Ref)
 					return nil
 				})
-				if err := sto.RemoveBlobs(all); err != nil {
+				if err := sto.RemoveBlobs(ctxbg, all); err != nil {
 					t.Fatalf("Error removing blobs during cleanup: %v", err)
 				}
 				if beforeTests {
@@ -139,10 +141,10 @@ func testStorage(t *testing.T, bucketDir string) {
 				if bucketWithDir != *bucket {
 					// checking that "a" and "c" at the root were left untouched.
 					for _, key := range []string{"a", "c"} {
-						if _, _, err := sto.(*s3Storage).s3Client.Get(sto.(*s3Storage).bucket, key); err != nil {
+						if _, _, err := sto.(*s3Storage).s3Client.Get(ctxbg, sto.(*s3Storage).bucket, key); err != nil {
 							t.Fatalf("could not find object %s after tests: %v", key, err)
 						}
-						if err := sto.(*s3Storage).s3Client.Delete(sto.(*s3Storage).bucket, key); err != nil {
+						if err := sto.(*s3Storage).s3Client.Delete(ctxbg, sto.(*s3Storage).bucket, key); err != nil {
 							t.Fatalf("could not remove object %s after tests: %v", key, err)
 						}
 					}

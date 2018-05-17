@@ -1,5 +1,5 @@
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package index
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,18 +31,16 @@ import (
 	"sync"
 	"time"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"camlistore.org/pkg/env"
-	"camlistore.org/pkg/schema"
-	"camlistore.org/pkg/sorted"
-	"camlistore.org/pkg/types/camtypes"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
+	"perkeep.org/pkg/env"
+	"perkeep.org/pkg/schema"
+	"perkeep.org/pkg/sorted"
+	"perkeep.org/pkg/types/camtypes"
 
 	"go4.org/jsonconfig"
 	"go4.org/strutil"
 	"go4.org/types"
-
-	"golang.org/x/net/context"
 )
 
 func init() {
@@ -99,7 +98,73 @@ var (
 	_ Interface          = (*Index)(nil)
 )
 
+func (x *Index) logf(format string, args ...interface{}) {
+	log.Printf("index: "+format, args...)
+}
+
 var aboutToReindex = false
+
+// SignerRefSet is the set of all blob Refs (of different hashes) that represent
+// the same signer GPG identity. They are stored as strings for allocation reasons:
+// we favor allocating when updating SignerRefSets in the corpus over when reading
+// them.
+type SignerRefSet []string
+
+// Owner is the set of methods that identify, through their GPG key, a signer of
+// claims and permanodes.
+type Owner struct {
+	keyID []string
+	// blobByKeyID maps an owner GPG ID to all its owner blobs (because different hashes).
+	// refs are stored as strings for allocation reasons.
+	blobByKeyID map[string]SignerRefSet
+}
+
+// NewOwner returns an Owner that associates keyID with ref.
+func NewOwner(keyID string, ref blob.Ref) *Owner {
+	return &Owner{
+		keyID:       []string{keyID},
+		blobByKeyID: map[string]SignerRefSet{keyID: SignerRefSet{ref.String()}},
+	}
+}
+
+// KeyID returns the GPG key ID (e.g. 2931A67C26F5ABDA) of the owner. Its
+// signature might change when support for multiple GPG keys is introduced.
+func (o *Owner) KeyID() string {
+	if o == nil || len(o.keyID) == 0 {
+		return ""
+	}
+	return o.keyID[0]
+}
+
+// RefSet returns the set of refs that represent the same owner as keyID.
+func (o *Owner) RefSet(keyID string) SignerRefSet {
+	if o == nil || len(o.blobByKeyID) == 0 {
+		return nil
+	}
+	refs := o.blobByKeyID[keyID]
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+// BlobRef returns the currently recommended ref implementation of the owner GPG
+// key blob. Its signature might change when support for multiple hashes and/or
+// multiple GPG keys is introduced.
+func (o *Owner) BlobRef() blob.Ref {
+	if o == nil || len(o.blobByKeyID) == 0 {
+		return blob.Ref{}
+	}
+	refs := o.blobByKeyID[o.KeyID()]
+	if len(refs) == 0 {
+		return blob.Ref{}
+	}
+	ref, ok := blob.Parse(refs[0])
+	if !ok {
+		return blob.Ref{}
+	}
+	return ref
+}
 
 // TODO(mpl): I'm not sure there are any cases where we don't want the index to
 // have a blobSource, so maybe we should phase out InitBlobSource and integrate it
@@ -152,7 +217,7 @@ func New(s sorted.KeyValue) (*Index, error) {
 			if is4To5SchemaBump(schemaVersion) {
 				return idx, errMissingWholeRef
 			}
-			tip = "Run 'camlistored --reindex' (it might take awhile, but shows status). Alternative: 'camtool dbinit' (or just delete the file for a file based index), and then 'camtool sync --all'"
+			tip = "Run 'perkeepd --reindex' (it might take awhile, but shows status). Alternative: 'camtool dbinit' (or just delete the file for a file based index), and then 'camtool sync --all'"
 		}
 		return nil, fmt.Errorf("index schema version is %d; required one is %d. You need to reindex. %s",
 			schemaVersion, requiredSchemaVersion, tip)
@@ -180,13 +245,13 @@ func (x *Index) fixMissingWholeRef(fetcher blob.Fetcher) (err error) {
 	if x.schemaVersion() != 4 || requiredSchemaVersion != 5 {
 		panic("fixMissingWholeRef should only be used when upgrading from v4 to v5 of the index schema")
 	}
-	log.Println("index: fixing the missing wholeRef in the fileInfo rows...")
+	x.logf("fixing the missing wholeRef in the fileInfo rows...")
 	defer func() {
 		if err != nil {
-			log.Printf("index: fixing the fileInfo rows failed: %v", err)
+			x.logf("fixing the fileInfo rows failed: %v", err)
 			return
 		}
-		log.Print("index: successfully fixed wholeRef in FileInfo rows.")
+		x.logf("successfully fixed wholeRef in FileInfo rows.")
 	}()
 
 	// first build a reverted keyWholeToFileRef map, so we can get the wholeRef from the fileRef easily.
@@ -223,7 +288,7 @@ func (x *Index) fixMissingWholeRef(fetcher blob.Fetcher) (err error) {
 	for it.Next() {
 		select {
 		case <-t.C:
-			log.Printf("Recorded %d missing wholeRef that we'll try to fix, and %d that we can't fix.", fixedEntries, missedEntries)
+			x.logf("recorded %d missing wholeRef that we'll try to fix, and %d that we can't fix.", fixedEntries, missedEntries)
 		default:
 		}
 		br, ok := blob.ParseBytes(it.KeyBytes()[len(keyPrefix):])
@@ -233,7 +298,7 @@ func (x *Index) fixMissingWholeRef(fetcher blob.Fetcher) (err error) {
 		wholeRef, ok := fileRefToWholeRef[br]
 		if !ok {
 			missedEntries++
-			log.Printf("WARNING: wholeRef for %v not found in index. You should probably rebuild the whole index.", br)
+			x.logf("WARNING: wholeRef for %v not found in index. You should probably rebuild the whole index.", br)
 			continue
 		}
 		valPart := strutil.AppendSplitN(valA[:0], it.Value(), "|", 3)
@@ -249,7 +314,7 @@ func (x *Index) fixMissingWholeRef(fetcher blob.Fetcher) (err error) {
 			// For the "production" migrations between 0.8 and 0.9, the index should not have any wholeRef
 			// in the keyFileInfo entries. So if something goes wrong and is somehow linked to that happening,
 			// I'd like to know about it, hence the logging.
-			log.Printf("%v: %v already has a wholeRef, not fixing it", it.Key(), it.Value())
+			x.logf("%v: %v already has a wholeRef, not fixing it", it.Key(), it.Value())
 			continue
 		}
 		size, err := strconv.Atoi(size_s)
@@ -262,7 +327,7 @@ func (x *Index) fixMissingWholeRef(fetcher blob.Fetcher) (err error) {
 	if err := it.Close(); err != nil {
 		return err
 	}
-	log.Printf("Starting to commit the missing wholeRef fixes (%d entries) now, this can take a while.", fixedEntries)
+	x.logf("starting to commit the missing wholeRef fixes (%d entries) now, this can take a while.", fixedEntries)
 	bm := x.s.BeginBatch()
 	for k, v := range mutations {
 		bm.Set(k, v)
@@ -272,7 +337,7 @@ func (x *Index) fixMissingWholeRef(fetcher blob.Fetcher) (err error) {
 		return err
 	}
 	if missedEntries > 0 {
-		log.Printf("Some missing wholeRef entries were not fixed (%d), you should do a full reindex.", missedEntries)
+		x.logf("some missing wholeRef entries were not fixed (%d), you should do a full reindex.", missedEntries)
 	}
 	return nil
 }
@@ -342,7 +407,7 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (blobserver.Stor
 }
 
 func (x *Index) String() string {
-	return fmt.Sprintf("Camlistore index, using key/value implementation %T", x.s)
+	return fmt.Sprintf("Perkeep index, using key/value implementation %T", x.s)
 }
 
 func (x *Index) isEmpty() bool {
@@ -385,7 +450,7 @@ func (x *Index) Reindex() error {
 	x.Unlock()
 	reindexMaxProcs.RLock()
 	defer reindexMaxProcs.RUnlock()
-	ctx := context.TODO()
+	ctx := context.Background()
 
 	if !x.hasWiped {
 		wiper, ok := x.s.(sorted.Wiper)
@@ -412,7 +477,7 @@ func (x *Index) Reindex() error {
 
 	blobc := make(chan blob.Ref, 32)
 
-	enumCtx := context.TODO()
+	enumCtx := context.Background()
 	enumErr := make(chan error, 1)
 	go func() {
 		defer close(blobc)
@@ -441,7 +506,7 @@ func (x *Index) Reindex() error {
 		go func() {
 			defer wg.Done()
 			for br := range blobc {
-				if err := x.indexBlob(br); err != nil {
+				if err := x.indexBlob(ctx, br); err != nil {
 					log.Printf("Error reindexing %v: %v", br, err)
 					nerrmu.Lock()
 					nerr++
@@ -470,7 +535,6 @@ func (x *Index) Reindex() error {
 		return fmt.Errorf("%d blobs are still needed as dependencies", needed)
 	}
 
-	log.Printf("Index rebuild complete.")
 	nerrmu.Lock() // no need to unlock
 	if nerr != 0 {
 		return fmt.Errorf("%d blobs failed to re-index", nerr)
@@ -478,6 +542,7 @@ func (x *Index) Reindex() error {
 	if err := x.initDeletesCache(); err != nil {
 		return err
 	}
+	log.Printf("Index rebuild complete.")
 	return nil
 }
 
@@ -486,8 +551,11 @@ func (x *Index) Reindex() error {
 // if any of them is not found. It only returns an error if something went wrong
 // during the enumeration.
 func (x *Index) integrityCheck(timeout time.Duration) error {
-	log.Print("Starting index integrity check.")
-	defer log.Print("Index integrity check done.")
+	t0 := time.Now()
+	x.logf("starting integrity check...")
+	defer func() {
+		x.logf("integrity check done (after %v)", time.Since(t0).Round(10*time.Millisecond))
+	}()
 	if x.blobSource == nil {
 		return errors.New("index: can't check sanity of index: no blobSource")
 	}
@@ -520,7 +588,7 @@ func (x *Index) integrityCheck(timeout time.Duration) error {
 	}
 	if len(notFound) > 0 {
 		// TODO(mpl): at least on GCE, display that message and maybe more on a web UI page as well.
-		log.Printf("WARNING: sanity checking of the index found %d non-indexed blobs out of %d tested blobs. Reindexing is advised.", len(notFound), len(notFound)+len(seen))
+		x.logf("WARNING: sanity checking of the index found %d non-indexed blobs out of %d tested blobs. Reindexing is advised.", len(notFound), len(notFound)+len(seen))
 	}
 	return nil
 }
@@ -711,11 +779,11 @@ func (x *Index) GetRecentPermanodes(ctx context.Context, dest chan<- camtypes.Re
 
 	keyId, err := x.KeyId(ctx, owner)
 	if err == sorted.ErrNotFound {
-		log.Printf("No recent permanodes because keyId for owner %v not found", owner)
+		x.logf("no recent permanodes because keyId for owner %v not found", owner)
 		return nil
 	}
 	if err != nil {
-		log.Printf("Error fetching keyId for owner %v: %v", owner, err)
+		x.logf("error fetching keyId for owner %v: %v", owner, err)
 		return err
 	}
 
@@ -763,25 +831,25 @@ func (x *Index) GetRecentPermanodes(ctx context.Context, dest chan<- camtypes.Re
 }
 
 func (x *Index) AppendClaims(ctx context.Context, dst []camtypes.Claim, permaNode blob.Ref,
-	signerFilter blob.Ref,
+	signerFilter string,
 	attrFilter string) ([]camtypes.Claim, error) {
 	if x.corpus != nil {
 		return x.corpus.AppendClaims(ctx, dst, permaNode, signerFilter, attrFilter)
 	}
 	var (
-		keyId string
-		err   error
-		it    sorted.Iterator
+		err error
+		it  sorted.Iterator
 	)
-	if signerFilter.Valid() {
-		keyId, err = x.KeyId(ctx, signerFilter)
-		if err == sorted.ErrNotFound {
-			return nil, nil
-		}
+	var signerRefs SignerRefSet
+	if signerFilter != "" {
+		signerRefs, err = x.signerRefs(ctx, signerFilter)
 		if err != nil {
-			return nil, err
+			return dst, err
 		}
-		it = x.queryPrefix(keyPermanodeClaim, permaNode, keyId)
+		if len(signerRefs) == 0 {
+			return dst, nil
+		}
+		it = x.queryPrefix(keyPermanodeClaim, permaNode, signerFilter)
 	} else {
 		it = x.queryPrefix(keyPermanodeClaim, permaNode)
 	}
@@ -810,7 +878,9 @@ func (x *Index) AppendClaims(ctx context.Context, dst []camtypes.Claim, permaNod
 		if attrFilter != "" && cl.Attr != attrFilter {
 			continue
 		}
-		if signerFilter.Valid() && cl.Signer != signerFilter {
+		// TODO(mpl): if we ever pass an Owner to AppendClaims, then we could have a
+		// Matches method on it, that we would use here.
+		if signerFilter != "" && !signerRefs.blobMatches(cl.Signer) {
 			continue
 		}
 		dst = append(dst, cl)
@@ -883,11 +953,43 @@ func (x *Index) GetBlobMeta(ctx context.Context, br blob.Ref) (camtypes.BlobMeta
 	}, nil
 }
 
+// HasLegacySHA1 reports whether the index has legacy SHA-1 blobs.
+func (x *Index) HasLegacySHA1() (ok bool, err error) {
+	if x.corpus != nil {
+		return x.corpus.hasLegacySHA1, err
+	}
+	it := x.queryPrefix(keyWholeToFileRef, "sha1-")
+	defer closeIterator(it, &err)
+	for it.Next() {
+		return true, err
+	}
+	return false, err
+}
+
 func (x *Index) KeyId(ctx context.Context, signer blob.Ref) (string, error) {
 	if x.corpus != nil {
 		return x.corpus.KeyId(ctx, signer)
 	}
 	return x.s.Get("signerkeyid:" + signer.String())
+}
+
+// signerRefs returns the set of signer blobRefs matching the signer keyID. It
+// does not return an error if none is found.
+func (x *Index) signerRefs(ctx context.Context, keyID string) (SignerRefSet, error) {
+	if x.corpus != nil {
+		return x.corpus.signerRefs[keyID], nil
+	}
+	it := x.queryPrefixString(keySignerKeyID.name)
+	var err error
+	var refs SignerRefSet
+	defer closeIterator(it, &err)
+	prefix := keySignerKeyID.name + ":"
+	for it.Next() {
+		if it.Value() == keyID {
+			refs = append(refs, strings.TrimPrefix(it.Key(), prefix))
+		}
+	}
+	return refs, nil
 }
 
 func (x *Index) PermanodeOfSignerAttrValue(ctx context.Context, signer blob.Ref, attr, val string) (permaNode blob.Ref, err error) {
@@ -909,8 +1011,9 @@ func (x *Index) PermanodeOfSignerAttrValue(ctx context.Context, signer blob.Ref,
 	return blob.Ref{}, os.ErrNotExist
 }
 
-// This is just like PermanodeOfSignerAttrValue except we return multiple and dup-suppress.
-// If request.Query is "", it is not used in the prefix search.
+// SearchPermanodesWithAttr is just like PermanodeOfSignerAttrValue
+// except we return multiple and dup-suppress.  If request.Query is
+// "", it is not used in the prefix search.
 func (x *Index) SearchPermanodesWithAttr(ctx context.Context, dest chan<- blob.Ref, request *camtypes.PermanodeByAttrRequest) (err error) {
 	defer close(dest)
 	if request.FuzzyMatch {
@@ -1204,7 +1307,7 @@ func (x *Index) PathLookup(ctx context.Context, signer, base blob.Ref, suffix st
 	return best, nil
 }
 
-func (x *Index) ExistingFileSchemas(wholeRef blob.Ref) (schemaRefs []blob.Ref, err error) {
+func (x *Index) existingFileSchemas(wholeRef blob.Ref) (schemaRefs []blob.Ref, err error) {
 	it := x.queryPrefix(keyWholeToFileRef, wholeRef)
 	defer closeIterator(it, &err)
 	for it.Next() {
@@ -1220,6 +1323,22 @@ func (x *Index) ExistingFileSchemas(wholeRef blob.Ref) (schemaRefs []blob.Ref, e
 	return schemaRefs, nil
 }
 
+// WholeRefToFile maps a file contents blobRef (a "wholeRef"), to the file schemas with those contents.
+type WholeRefToFile map[string][]blob.Ref
+
+// ExistingFileSchemas returns the file schemas for the provided file contents refs.
+func (x *Index) ExistingFileSchemas(wholeRef ...blob.Ref) (WholeRefToFile, error) {
+	schemaRefs := make(WholeRefToFile)
+	for _, v := range wholeRef {
+		newRefs, err := x.existingFileSchemas(v)
+		if err != nil {
+			return nil, err
+		}
+		schemaRefs[v.String()] = newRefs
+	}
+	return schemaRefs, nil
+}
+
 func (x *Index) loadKey(key string, val *string, err *error, wg *sync.WaitGroup) {
 	defer wg.Done()
 	*val, *err = x.s.Get(key)
@@ -1230,7 +1349,7 @@ func (x *Index) GetFileInfo(ctx context.Context, fileRef blob.Ref) (camtypes.Fil
 		return x.corpus.GetFileInfo(ctx, fileRef)
 	}
 	ikey := "fileinfo|" + fileRef.String()
-	tkey := "filetimes|" + fileRef.String()
+	tkey := keyFileTimes.name + "|" + fileRef.String()
 	// TODO: switch this to use syncutil.Group
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
@@ -1248,7 +1367,7 @@ func (x *Index) GetFileInfo(ctx context.Context, fileRef blob.Ref) (camtypes.Fil
 	}
 	valPart := strings.Split(iv, "|")
 	if len(valPart) < 3 {
-		log.Printf("index: bogus key %q = %q", ikey, iv)
+		x.logf("bogus key %q = %q", ikey, iv)
 		return camtypes.FileInfo{}, os.ErrNotExist
 	}
 	var wholeRef blob.Ref
@@ -1257,7 +1376,7 @@ func (x *Index) GetFileInfo(ctx context.Context, fileRef blob.Ref) (camtypes.Fil
 	}
 	size, err := strconv.ParseInt(valPart[0], 10, 64)
 	if err != nil {
-		log.Printf("index: bogus integer at position 0 in key %q = %q", ikey, iv)
+		x.logf("bogus integer at position 0 in key %q = %q", ikey, iv)
 		return camtypes.FileInfo{}, os.ErrNotExist
 	}
 	fileName := urld(valPart[1])
@@ -1353,7 +1472,7 @@ func (x *Index) GetFileLocation(ctx context.Context, fileRef blob.Ref) (camtypes
 		}
 		// TODO(mpl): Brad says to move this check lower, in corpus func and/or when building corpus from index rows.
 		if math.IsNaN(long) || math.IsNaN(lat) {
-			return camtypes.Location{}, fmt.Errorf("Latitude or Longitude in corpus for %v is NaN. Reindex to fix it.", fileRef)
+			return camtypes.Location{}, fmt.Errorf("latitude or longitude in corpus for %v is NaN. Reindex to fix it", fileRef)
 		}
 		return camtypes.Location{Latitude: lat, Longitude: long}, nil
 	}
@@ -1382,7 +1501,7 @@ func (x *Index) GetFileLocation(ctx context.Context, fileRef blob.Ref) (camtypes
 		return camtypes.Location{}, fmt.Errorf("index: bogus value at position 1 in key %q = %q", key, v)
 	}
 	if math.IsNaN(long) || math.IsNaN(lat) {
-		return camtypes.Location{}, fmt.Errorf("Latitude or Longitude in index for %v is NaN. Reindex to fix it.", fileRef)
+		return camtypes.Location{}, fmt.Errorf("latitude or longitude in index for %v is NaN. Reindex to fix it", fileRef)
 	}
 	return camtypes.Location{Latitude: lat, Longitude: long}, nil
 }
@@ -1446,10 +1565,25 @@ func kvEdgeBackward(k, v string) (edge *camtypes.Edge, ok bool) {
 }
 
 // GetDirMembers sends on dest the children of the static directory dir.
-func (x *Index) GetDirMembers(dir blob.Ref, dest chan<- blob.Ref, limit int) (err error) {
+func (x *Index) GetDirMembers(ctx context.Context, dir blob.Ref, dest chan<- blob.Ref, limit int) (err error) {
 	defer close(dest)
 
 	sent := 0
+	if x.corpus != nil {
+		children, err := x.corpus.GetDirChildren(ctx, dir)
+		if err != nil {
+			return err
+		}
+		for child := range children {
+			dest <- child
+			sent++
+			if sent == limit {
+				break
+			}
+		}
+		return nil
+	}
+
 	it := x.queryPrefix(keyStaticDirChild, dir.String())
 	defer closeIterator(it, &err)
 	for it.Next() {

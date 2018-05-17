@@ -1,5 +1,5 @@
 /*
-Copyright 2013 The Camlistore Authors
+Copyright 2013 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,14 +15,14 @@ limitations under the License.
 */
 
 // Package kvtest tests sorted.KeyValue implementations.
-package kvtest // import "camlistore.org/pkg/sorted/kvtest"
+package kvtest // import "perkeep.org/pkg/sorted/kvtest"
 
 import (
 	"reflect"
 	"testing"
 
-	"camlistore.org/pkg/sorted"
-	"camlistore.org/pkg/test"
+	"perkeep.org/pkg/sorted"
+	"perkeep.org/pkg/test"
 )
 
 func TestSorted(t *testing.T, kv sorted.KeyValue) {
@@ -120,12 +120,12 @@ func testInsertLarge(t *testing.T, kv sorted.KeyValue) {
 	largeKey := make([]byte, sorted.MaxKeySize-1)
 	// setting all the bytes because postgres whines about an invalid byte sequence
 	// otherwise
-	for k, _ := range largeKey {
+	for k := range largeKey {
 		largeKey[k] = 'A'
 	}
 	largeKey[sorted.MaxKeySize-2] = 'B'
 	largeValue := make([]byte, sorted.MaxValueSize-1)
-	for k, _ := range largeValue {
+	for k := range largeValue {
 		largeValue[k] = 'A'
 	}
 	largeValue[sorted.MaxValueSize-2] = 'B'

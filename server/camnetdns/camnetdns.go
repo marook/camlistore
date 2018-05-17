@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Camlistore Authors
+Copyright 2016 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
@@ -30,10 +31,10 @@ import (
 	"strings"
 	"time"
 
-	"camlistore.org/pkg/gpgchallenge"
-	"camlistore.org/pkg/lru"
-	"camlistore.org/pkg/osutil"
-	"camlistore.org/pkg/sorted"
+	"perkeep.org/internal/lru"
+	"perkeep.org/internal/osutil"
+	"perkeep.org/pkg/gpgchallenge"
+	"perkeep.org/pkg/sorted"
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/datastore"
@@ -41,7 +42,6 @@ import (
 	"github.com/miekg/dns"
 	"go4.org/cloud/cloudlaunch"
 	"golang.org/x/crypto/acme/autocert"
-	"golang.org/x/net/context"
 	"golang.org/x/net/http2"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -59,7 +59,7 @@ var launchConfig = &cloudlaunch.Config{
 	GCEProjectID: GCEProjectID,
 	Scopes: []string{
 		compute.ComputeScope,
-		logging.Scope,
+		logging.WriteScope,
 		datastore.ScopeDatastore,
 	},
 }
@@ -73,7 +73,7 @@ const (
 	// max number of records in the lru cache
 	cacheSize = 1e6
 	// stagingCamwebHost is the FQDN of the staging version of the
-	// Camlistore website. We handle it differently from the rest as:
+	// Perkeep website. We handle it differently from the rest as:
 	// 1) we discover its IP using the GCE API, 2) we only trust the stored
 	// version of it for 5 minutes.
 	stagingCamwebHost = "staging.camlistore.net."
@@ -480,6 +480,7 @@ func main() {
 
 	tcperr := make(chan error, 1)
 	udperr := make(chan error, 1)
+	httpserr := make(chan error, 1)
 	httperr := make(chan error, 1)
 	log.Printf("serving DNS on %s\n", *addr)
 	go func() {
@@ -501,6 +502,9 @@ func main() {
 			HostPolicy: autocert.HostWhitelist(hostname),
 			Cache:      autocert.DirCache(osutil.DefaultLetsEncryptCache()),
 		}
+		go func() {
+			httperr <- http.ListenAndServe(":http", m.HTTPHandler(nil))
+		}()
 		ln, err := tls.Listen("tcp", httpsListenAddr, &tls.Config{
 			Rand:           rand.Reader,
 			Time:           time.Now,
@@ -512,7 +516,7 @@ func main() {
 			log.Fatalf("Error listening on %v: %v", httpsListenAddr, err)
 		}
 		go func() {
-			httperr <- http.Serve(ln, cs)
+			httpserr <- http.Serve(ln, cs)
 		}()
 	}
 	select {
@@ -520,7 +524,9 @@ func main() {
 		log.Fatalf("DNS over TCP error: %v", err)
 	case err := <-udperr:
 		log.Fatalf("DNS error: %v", err)
+	case err := <-httpserr:
+		log.Fatalf("HTTPS server error: %v", err)
 	case err := <-httperr:
-		log.Fatalf("HTTP server error: %v", err)
+		log.Fatalf("HTTP server for Let's Encrypt error: %v", err)
 	}
 }

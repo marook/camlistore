@@ -1,7 +1,7 @@
 // +build linux darwin
 
 /*
-Copyright 2013 Google Inc.
+Copyright 2013 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ limitations under the License.
 package fs
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -26,12 +27,11 @@ import (
 	"sync"
 	"time"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/search"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/search"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"golang.org/x/net/context"
 )
 
 // recentDir implements fuse.Node and is a directory of recent
@@ -81,7 +81,7 @@ func (n *recentDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	n.modTime = make(map[string]time.Time)
 
 	req := &search.RecentRequest{N: 100}
-	res, err := n.fs.client.GetRecentPermanodes(req)
+	res, err := n.fs.client.GetRecentPermanodes(ctx, req)
 	if err != nil {
 		log.Printf("fs.recent: GetRecentPermanodes error in ReadDirAll: %v", err)
 		return nil, fuse.EIO

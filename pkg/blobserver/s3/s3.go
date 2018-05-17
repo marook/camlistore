@@ -1,5 +1,5 @@
 /*
-Copyright 2011 Google Inc.
+Copyright 2011 The Perkeep Authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,17 +31,19 @@ Example low-level config:
      },
 
 */
-package s3 // import "camlistore.org/pkg/blobserver/s3"
+package s3 // import "perkeep.org/pkg/blobserver/s3"
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
 
-	"camlistore.org/pkg/blob"
-	"camlistore.org/pkg/blobserver"
-	"camlistore.org/pkg/blobserver/memory"
-	"camlistore.org/pkg/misc/amazon/s3"
+	"perkeep.org/internal/amazon/s3"
+	"perkeep.org/pkg/blob"
+	"perkeep.org/pkg/blobserver"
+	"perkeep.org/pkg/blobserver/memory"
+	"perkeep.org/pkg/blobserver/proxycache"
 
 	"go4.org/fault"
 	"go4.org/jsonconfig"
@@ -72,7 +74,6 @@ type s3Storage struct {
 	// slash.
 	dirPrefix string
 	hostname  string
-	cache     *memory.Storage // or nil for no cache
 }
 
 func (s *s3Storage) String() string {
@@ -112,24 +113,23 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	if cacheSize != 0 {
-		sto.cache = memory.NewCache(cacheSize)
-	}
+
+	ctx := context.Background() // TODO: 5 min timeout or something?
 	if !skipStartupCheck {
-		_, err := client.ListBucket(sto.bucket, "", 1)
+		_, err := client.ListBucket(ctx, sto.bucket, "", 1)
 		if serr, ok := err.(*s3.Error); ok {
 			if serr.AmazonCode == "NoSuchBucket" {
-				return nil, fmt.Errorf("Bucket %q doesn't exist.", sto.bucket)
+				return nil, fmt.Errorf("bucket %q doesn't exist", sto.bucket)
 			}
 
 			// This code appears when the hostname has dots in it:
 			if serr.AmazonCode == "PermanentRedirect" {
-				loc, lerr := client.BucketLocation(sto.bucket)
+				loc, lerr := client.BucketLocation(ctx, sto.bucket)
 				if lerr != nil {
 					return nil, fmt.Errorf("Wrong server for bucket %q; and error determining bucket's location: %v", sto.bucket, lerr)
 				}
 				client.Auth.Hostname = loc
-				_, err = client.ListBucket(sto.bucket, "", 1)
+				_, err = client.ListBucket(ctx, sto.bucket, "", 1)
 				if err == nil {
 					log.Printf("Warning: s3 server should be %q, not %q. Change config file to avoid start-up latency.", client.Auth.Hostname, hostname)
 				}
@@ -142,7 +142,7 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 				// UseEndpoint will be e.g. "brads3test-ca.s3-us-west-1.amazonaws.com"
 				// But we only want the "s3-us-west-1.amazonaws.com" part.
 				client.Auth.Hostname = strings.TrimPrefix(serr.UseEndpoint, sto.bucket+".")
-				_, err = client.ListBucket(sto.bucket, "", 1)
+				_, err = client.ListBucket(ctx, sto.bucket, "", 1)
 				if err == nil {
 					log.Printf("Warning: s3 server should be %q, not %q. Change config file to avoid start-up latency.", client.Auth.Hostname, hostname)
 				}
@@ -151,6 +151,13 @@ func newFromConfig(_ blobserver.Loader, config jsonconfig.Obj) (blobserver.Stora
 		if err != nil {
 			return nil, fmt.Errorf("Error listing bucket %s: %v", sto.bucket, err)
 		}
+	}
+
+	if cacheSize != 0 {
+		// This has two layers of LRU caching (proxycache and memory).
+		// We make the outer one 4x the size so that it doesn't evict from the
+		// underlying one when it's about to perform its own eviction.
+		return proxycache.New(cacheSize<<2, memory.NewCache(cacheSize), sto), nil
 	}
 	return sto, nil
 }
