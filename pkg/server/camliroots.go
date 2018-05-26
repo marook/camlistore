@@ -177,7 +177,10 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 }
 
 func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
-	rootRes, err := camliRoots.client.GetPermanodesWithAttr(context.TODO(), &search.WithAttrRequest{N: 100, Attr: "camliRoot"})
+	rootRes, err := camliRoots.search.GetPermanodesWithAttr(&search.WithAttrRequest{
+		N: 100,
+		Attr: "camliRoot",
+	})
 	if err != nil {
 		http.Error(rw, "Server error", http.StatusInternalServerError)
 		return nil, err
@@ -191,7 +194,7 @@ func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camli
 	}
 	if len(dr.BlobRefs) == 0 {
 		http.Error(rw, "Not found.", http.StatusNotFound)
-		return nil, err
+		return nil, errors.New("No camliRoots found")
 	}
 
 	dres, err := camliRoots.client.Describe(context.TODO(), dr)
