@@ -149,8 +149,11 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 			return
 		}
 
+		constraint := search.Constraint{
+			CamliType: "permanode",
+			BlobRefPrefix: *nextBlobRefStr,
+		}
 		describeRule := search.DescribeRule{
-			IfResultRoot: true,
 			Attrs: []string{ "camliPath:*", "camliContent" },
 		}
 		describe := search.DescribeRequest{
@@ -159,6 +162,7 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 			Rules: []*search.DescribeRule{ &describeRule },
 		}
 		query := search.SearchQuery{
+			Constraint: &constraint,
 			Limit: 100,
 			Describe: &describe,
 		}
@@ -173,6 +177,11 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 			return
 		}
 		currentPermanodeDescribe = results.Describe.Meta[*nextBlobRefStr]
+		if currentPermanodeDescribe == nil {
+			log.Printf("Failed to query permanode %v (below %v)", *nextBlobRefStr, pathSegment)
+			http.Error(rw, "Server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	camliRoots.ServePermanodeContent(rw, req, currentPermanodeDescribe)
