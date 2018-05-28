@@ -123,7 +123,7 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 		return
 	}
 
-	camliRootDescribe, err := camliRoots.FindCamliRoot(rw, pathSegments[0])
+	camliRootDescribe, err := camliRoots.FindCamliRoot(req.Context(), rw, pathSegments[0])
 	if err != nil {
 		return
 	}
@@ -176,47 +176,39 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 	camliRoots.ServePermanodeContent(rw, req, currentPermanodeDescribe)
 }
 
-func (camliRoots *CamliRootsHandler) FindCamliRoot(rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
-	rootRes, err := camliRoots.search.GetPermanodesWithAttr(&search.WithAttrRequest{
-		N: 100,
+func (camliRoots *CamliRootsHandler) FindCamliRoot(context context.Context, rw http.ResponseWriter, camliRootName string) (*search.DescribedBlob, error) {
+	permanodeConstraint := search.PermanodeConstraint{
 		Attr: "camliRoot",
-	})
+		Value: camliRootName,
+	}
+	constraint := search.Constraint{
+		Permanode: &permanodeConstraint,
+	}
+	describeRule := search.DescribeRule{
+		IfResultRoot: true,
+		Attrs: []string{ "camliPath:*" },
+	}
+	describe := search.DescribeRequest{
+		Rules: []*search.DescribeRule{ &describeRule },
+	}
+	query := search.SearchQuery{
+		Constraint: &constraint,
+		Limit: 100,
+		Describe: &describe,
+	}
+	results, err := camliRoots.search.Query(context, &query)
 	if err != nil {
+		log.Printf("camliRoot query failure: %v", err)
 		http.Error(rw, "Server error", http.StatusInternalServerError)
 		return nil, err
 	}
-
-	dr := &search.DescribeRequest{
-		Depth: 1,
+	if len(results.Blobs) == 0 {
+		msg := fmt.Sprintf("camliRoot '%s' not found.", camliRootName)
+		http.Error(rw, msg, http.StatusNotFound)
+		return nil, errors.New(msg)
 	}
-	for _, wi := range rootRes.WithAttr {
-		dr.BlobRefs = append(dr.BlobRefs, wi.Permanode)
-	}
-	if len(dr.BlobRefs) == 0 {
-		http.Error(rw, "Not found.", http.StatusNotFound)
-		return nil, errors.New("No camliRoots found")
-	}
-
-	dres, err := camliRoots.client.Describe(context.TODO(), dr)
-	if err != nil {
-		log.Printf("Describe failure: %s", err)
-		http.Error(rw, "Server error", http.StatusInternalServerError)
-		return nil, err
-	}
-
-	for _, wi := range rootRes.WithAttr {
-		pn := wi.Permanode
-		db := dres.Meta[pn.String()]
-		if db != nil && db.Permanode != nil {
-			name := db.Permanode.Attr.Get("camliRoot")
-			if name == camliRootName {
-				return db, nil
-			}
-		}
-	}
-
-	http.Error(rw, "Not found.", http.StatusNotFound)
-	return nil, errors.New("No camliRoot found with that name")
+	camliRootRef := results.Blobs[0].Blob
+	return results.Describe.Meta[camliRootRef.String()], nil
 }
 
 func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWriter, req *http.Request, permanodeDescribe *search.DescribedBlob) {
