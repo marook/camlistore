@@ -40,7 +40,6 @@ import (
 	"perkeep.org/pkg/auth"
 	"perkeep.org/pkg/blob"
 	"perkeep.org/pkg/blobserver"
-	"perkeep.org/pkg/client"
 	"perkeep.org/internal/httputil"
 	"perkeep.org/internal/magic"
 	"perkeep.org/pkg/schema"
@@ -51,7 +50,6 @@ import (
 )
 
 type CamliRootsHandler struct {
-	client  *client.Client
 	Fetcher blob.Fetcher
 
 	// Search is optional. If present, it's used to map a fileref
@@ -66,8 +64,6 @@ func init() {
 
 func camliRootsFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, err error) {
 	camliRoots := &CamliRootsHandler{
-		// TODO maybe we should try not to mix client and server access to the blobs here
-		client: client.NewOrFail(), // automatic from flags
 		search: nil,                // initialized by InitHandler(...)
 	}
 
@@ -123,7 +119,8 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 		return
 	}
 
-	camliRootDescribe, err := camliRoots.FindCamliRoot(req.Context(), rw, pathSegments[0])
+	ctx := req.Context()
+	camliRootDescribe, err := camliRoots.FindCamliRoot(ctx, rw, pathSegments[0])
 	if err != nil {
 		return
 	}
@@ -147,30 +144,35 @@ func (camliRoots *CamliRootsHandler) ServeHTTP(rw http.ResponseWriter, req *http
 
 		nextBlobRef, ok := blob.Parse(*nextBlobRefStr)
 		if !ok {
-			log.Printf("Failed to parse ref %s", *nextBlobRefStr)
+			log.Printf("Failed to parse ref '%s'", *nextBlobRefStr)
 			http.Error(rw, "Server error", http.StatusInternalServerError)
 			return
 		}
 
-		dr := &search.DescribeRequest{
-			Depth:    1,
-			BlobRefs: []blob.Ref{nextBlobRef},
+		describeRule := search.DescribeRule{
+			IfResultRoot: true,
+			Attrs: []string{ "camliPath:*", "camliContent" },
 		}
-		dres, err := camliRoots.client.Describe(context.TODO(), dr)
+		describe := search.DescribeRequest{
+			Depth: 1,
+			BlobRefs: []blob.Ref{ nextBlobRef },
+			Rules: []*search.DescribeRule{ &describeRule },
+		}
+		query := search.SearchQuery{
+			Limit: 100,
+			Describe: &describe,
+		}
+		results, err := camliRoots.search.Query(ctx, &query)
 		if err != nil {
-			log.Printf("Describe failure: %s", err)
+			log.Printf("child query failure: %v", err)
 			http.Error(rw, "Server error", http.StatusInternalServerError)
 			return
 		}
-
-		db := dres.Meta[*nextBlobRefStr]
-		if db == nil || db.Permanode == nil {
-			log.Printf("Expected permanode: %s", *nextBlobRefStr)
-			http.Error(rw, "Server error", http.StatusInternalServerError)
+		if len(results.Blobs) == 0 {
+			http.Error(rw, fmt.Sprintf("child %v not found.", pathSegment), http.StatusNotFound)
 			return
 		}
-
-		currentPermanodeDescribe = db
+		currentPermanodeDescribe = results.Describe.Meta[*nextBlobRefStr]
 	}
 
 	camliRoots.ServePermanodeContent(rw, req, currentPermanodeDescribe)
@@ -217,7 +219,7 @@ func (camliRoots *CamliRootsHandler) ServePermanodeContent(rw http.ResponseWrite
 	contentRefStr := permanodeDescribe.Permanode.Attr.Get("camliContent")
 	file, ok := blob.Parse(contentRefStr)
 	if !ok {
-		log.Printf("Failed to parse ref %s", contentRefStr)
+		log.Printf("Failed to parse ref '%s'", contentRefStr)
 		http.Error(rw, "Server error", http.StatusInternalServerError)
 		return
 	}
