@@ -337,7 +337,7 @@ func (sto *sto) Fetch(ctx context.Context, b blob.Ref) (rc io.ReadCloser, size u
 		return
 	}
 	if err != os.ErrNotExist {
-		log.Printf("warning: proxycache cache fetch error for %v: %v", b, err)
+		log.Printf("warning: proxycache cache fetch error for %v (type %T): %v", b, err, err)
 	}
 	rc, size, err = sto.origin.Fetch(ctx, b)
 	if err != nil {
@@ -349,7 +349,7 @@ func (sto *sto) Fetch(ctx context.Context, b blob.Ref) (rc io.ReadCloser, size u
 	}
 	go func() {
 		if _, err := blobserver.Receive(ctx, sto.cache, b, bytes.NewReader(all)); err != nil {
-			log.Printf("populating proxycache cache for %v: %v", b, err)
+			log.Printf("populating proxycache cache failed for %v: %v", b, err)
 			return
 		}
 		sto.touchBlob(ctx, blob.SizedRef{Ref: b, Size: size}, true)
@@ -376,6 +376,7 @@ func (sto *sto) StatBlobs(ctx context.Context, blobs []blob.Ref, fn func(blob.Si
 
 	originStats := []blob.SizedRef{}
 	if len(notCachedRefs) > 0 {
+		sto.mu.Unlock()
 		fnproxy := func (sr blob.SizedRef) error {
 			originStats = append(originStats, sr)
 			return fn(sr)
