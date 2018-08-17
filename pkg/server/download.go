@@ -345,6 +345,8 @@ func (dh *DownloadHandler) ServeFile(w http.ResponseWriter, r *http.Request, fil
 			if text {
 				fi.mime = "text/plain"
 			}
+		} else if fi.mime == "text/xml" && strings.HasSuffix(fi.name, ".svg") {
+			fi.mime = "image/svg+xml";
 		}
 		h.Set("Content-Disposition", "inline")
 	} else {
