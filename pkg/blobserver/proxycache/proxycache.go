@@ -336,8 +336,8 @@ func (sto *sto) Fetch(ctx context.Context, b blob.Ref) (rc io.ReadCloser, size u
 		sto.touchBlob(ctx, blob.SizedRef{Ref: b, Size: size}, true)
 		return
 	}
-	if err != os.ErrNotExist {
-		log.Printf("warning: proxycache cache fetch error for %v (type %T): %v", b, err, err)
+	if !isCacheMissError(err){
+		log.Printf("warning: proxycache cache fetch error for %v (type %T): '%v'", b, err, err.Error())
 	}
 	rc, size, err = sto.origin.Fetch(ctx, b)
 	if err != nil {
@@ -355,6 +355,10 @@ func (sto *sto) Fetch(ctx context.Context, b blob.Ref) (rc io.ReadCloser, size u
 		sto.touchBlob(ctx, blob.SizedRef{Ref: b, Size: size}, true)
 	}()
 	return ioutil.NopCloser(bytes.NewReader(all)), size, nil
+}
+
+func isCacheMissError(err error) (bool){
+	return err == os.ErrNotExist || err.Error() == "not found"
 }
 
 func (sto *sto) StatBlobs(ctx context.Context, blobs []blob.Ref, fn func(blob.SizedRef) error) error {
