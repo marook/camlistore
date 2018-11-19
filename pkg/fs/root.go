@@ -64,6 +64,7 @@ func (n *root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		{Name: "roots"},
 		{Name: "at"},
 		{Name: "sha1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+		{Name: "sha224-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
 		{Name: "versions"},
 	}, nil
 }
@@ -105,12 +106,12 @@ func (n *root) getVersionsDir() *versionsDir {
 }
 
 func (n *root) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	log.Printf("root.Lookup(%s)", name)
+	Logger.Printf("root.Lookup(%s)", name)
 	switch name {
 	case ".quitquitquit":
 		log.Fatalf("Shutting down due to root .quitquitquit lookup.")
 	case "WELCOME.txt":
-		return staticFileNode("Welcome to PerkeepFS.\n\nMore information is available in the pk-mount documentation.\n\nSee https://perkeep.org/cmd/pk-mount/\n"), nil
+		return staticFileNode("Welcome to PerkeepFS.\n\nMore information is available in the pk-mount documentation.\n\nSee https://perkeep.org/cmd/pk-mount/ , or run 'go doc perkeep.org/cmd/pk-mount'.\n"), nil
 	case "recent":
 		return n.getRecentDir(), nil
 	case "tag", "date":
@@ -123,6 +124,8 @@ func (n *root) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		return n.getVersionsDir(), nil
 	case "sha1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx":
 		return notImplementDirNode{}, nil
+	case "sha224-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx":
+		return notImplementDirNode{}, nil
 	case ".camli_fs_stats":
 		return statsDir{}, nil
 	case "mach_kernel", ".hidden", "._.":
@@ -131,9 +134,9 @@ func (n *root) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	}
 
 	if br, ok := blob.Parse(name); ok {
-		log.Printf("Root lookup of blobref. %q => %v", name, br)
+		Logger.Printf("Root lookup of blobref. %q => %v", name, br)
 		return &node{fs: n.fs, blobref: br}, nil
 	}
-	log.Printf("Bogus root lookup of %q", name)
+	Logger.Printf("Bogus root lookup of %q", name)
 	return nil, fuse.ENOENT
 }

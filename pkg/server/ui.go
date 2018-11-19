@@ -31,7 +31,7 @@ import (
 	"time"
 
 	fontawesomestatic "perkeep.org/clients/web/embed/fontawesome"
-	glitchstatic "perkeep.org/clients/web/embed/glitch"
+	keepystatic "perkeep.org/clients/web/embed/keepy"
 	leafletstatic "perkeep.org/clients/web/embed/leaflet"
 	lessstatic "perkeep.org/clients/web/embed/less"
 	opensansstatic "perkeep.org/clients/web/embed/opensans"
@@ -67,7 +67,7 @@ var (
 	leafletPattern     = regexp.MustCompile(`^leaflet/(.+)$`)
 	fontawesomePattern = regexp.MustCompile(`^fontawesome/(.+)$`)
 	openSansPattern    = regexp.MustCompile(`^opensans/(([^/]+)(/.*)?)$`)
-	glitchPattern      = regexp.MustCompile(`^glitch/(.+)$`)
+	keepyPattern       = regexp.MustCompile(`^keepy/(.+)$`)
 
 	disableThumbCache, _ = strconv.ParseBool(os.Getenv("CAMLI_DISABLE_THUMB_CACHE"))
 
@@ -78,9 +78,10 @@ var (
 type UIHandler struct {
 	publishRoots map[string]*publishRoot
 
-	prefix string // of the UI handler itself
-	root   *RootHandler
-	search *search.Handler
+	prefix        string // of the UI handler itself
+	root          *RootHandler
+	search        *search.Handler
+	shareImporter *shareImporter // nil if no root.Storage
 
 	// Cache optionally specifies a cache blob server, used for
 	// caching image thumbnails and other emphemeral data.
@@ -104,7 +105,7 @@ type UIHandler struct {
 	fileLeafletHandler     http.Handler
 	fileFontawesomeHandler http.Handler
 	fileOpenSansHandler    http.Handler
-	fileGlitchHandler      http.Handler
+	fileKeepyHandler       http.Handler
 }
 
 func init() {
@@ -203,9 +204,9 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 		if err != nil {
 			return nil, fmt.Errorf("Could not make leaflet handler: %s", err)
 		}
-		ui.fileGlitchHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "glitch"), "npc_piggy__x1_walk_png_1354829432.png")
+		ui.fileKeepyHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "keepy"), "keepy-dancing.png")
 		if err != nil {
-			return nil, fmt.Errorf("Could not make glitch handler: %s", err)
+			return nil, fmt.Errorf("Could not make keepy handler: %s", err)
 		}
 		ui.fileFontawesomeHandler, err = makeFileServer(ui.sourceRoot, filepath.Join(vendorEmbed, "fontawesome"), "css/font-awesome.css")
 		if err != nil {
@@ -230,6 +231,12 @@ func uiFromConfig(ld blobserver.Loader, conf jsonconfig.Obj) (h http.Handler, er
 		ui.root.registerUIHandler(ui)
 	} else {
 		return nil, errors.New("failed to find the 'root' handler")
+	}
+
+	if ui.root.Storage != nil {
+		ui.shareImporter = &shareImporter{
+			dest: ui.root.Storage,
+		}
 	}
 
 	return ui, nil
@@ -428,6 +435,8 @@ func (ui *UIHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		ui.serveUploadHelper(rw, req)
 	case strings.HasPrefix(suffix, "download/"):
 		ui.serveDownload(rw, req)
+	case strings.HasPrefix(suffix, "importshare"):
+		ui.importShare(rw, req)
 	case strings.HasPrefix(suffix, "thumbnail/"):
 		ui.serveThumbnail(rw, req)
 	case strings.HasPrefix(suffix, "tree/"):
@@ -442,8 +451,8 @@ func (ui *UIHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		ui.serveFromDiskOrStatic(rw, req, reactPattern, ui.fileReactHandler, reactstatic.Files)
 	case getSuffixMatches(req, leafletPattern):
 		ui.serveFromDiskOrStatic(rw, req, leafletPattern, ui.fileLeafletHandler, leafletstatic.Files)
-	case getSuffixMatches(req, glitchPattern):
-		ui.serveFromDiskOrStatic(rw, req, glitchPattern, ui.fileGlitchHandler, glitchstatic.Files)
+	case getSuffixMatches(req, keepyPattern):
+		ui.serveFromDiskOrStatic(rw, req, keepyPattern, ui.fileKeepyHandler, keepystatic.Files)
 	case getSuffixMatches(req, fontawesomePattern):
 		ui.serveFromDiskOrStatic(rw, req, fontawesomePattern, ui.fileFontawesomeHandler, fontawesomestatic.Files)
 	case getSuffixMatches(req, openSansPattern):
@@ -515,6 +524,7 @@ func (ui *UIHandler) discovery() *camtypes.UIDiscovery {
 		DirectoryHelper: path.Join(ui.prefix, "tree") + "/",
 		PublishRoots:    pubRoots,
 		MapClustering:   mapClustering,
+		ImportShare:     path.Join(ui.prefix, "importshare") + "/",
 	}
 	return uiDisco
 }
@@ -533,6 +543,14 @@ func (ui *UIHandler) serveDownload(w http.ResponseWriter, r *http.Request) {
 		Search:  ui.search,
 	}
 	dh.ServeHTTP(w, r)
+}
+
+func (ui *UIHandler) importShare(w http.ResponseWriter, r *http.Request) {
+	if ui.shareImporter == nil {
+		http.Error(w, "No ShareImporter capacity", 500)
+		return
+	}
+	ui.shareImporter.ServeHTTP(w, r)
 }
 
 func (ui *UIHandler) serveThumbnail(rw http.ResponseWriter, req *http.Request) {

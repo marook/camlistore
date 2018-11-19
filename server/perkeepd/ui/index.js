@@ -39,6 +39,7 @@ goog.require('cam.BlobItemDemoContent');
 goog.require('cam.BlobItemFoursquareContent');
 goog.require('cam.BlobItemGenericContent');
 goog.require('cam.BlobItemImageContent');
+goog.require('cam.BlobItemMastodonContent');
 goog.require('cam.BlobItemTwitterContent');
 goog.require('cam.BlobItemVideoContent');
 goog.require('cam.blobref');
@@ -73,6 +74,7 @@ cam.IndexPage = React.createClass({
 		cam.BlobItemDemoContent.getHandler,
 		cam.BlobItemFoursquareContent.getHandler,
 		cam.BlobItemTwitterContent.getHandler,
+		cam.BlobItemMastodonContent.getHandler,
 		cam.BlobItemImageContent.getHandler,
 		cam.BlobItemVideoContent.getHandler,
 		cam.BlobItemGenericContent.getHandler
@@ -148,6 +150,7 @@ cam.IndexPage = React.createClass({
 			currentSet: '',
 			dropActive: false,
 			selection: {},
+			importShareURL: null,
 			serverStatus: null,
 			// we keep track of where a touch started, so we can
 			// tell when the touch ends if we consider it a swipe. We
@@ -157,9 +160,11 @@ cam.IndexPage = React.createClass({
 			// TODO: This should be calculated by whether selection is empty, and not need separate state.
 			sidebarVisible: false,
 
-			uploadDialogVisible: false,
+			progressDialogVisible: false,
 			totalBytesToUpload: 0,
 			totalBytesComplete: 0,
+			totalNodesToAdd: 0,
+			nodesAlreadyAdded: 0,
 
 			// messageDialogContents is for displaying a message to
 			// the user. It is the child of getMessageDialog_(). To
@@ -168,6 +173,10 @@ cam.IndexPage = React.createClass({
 			// messageDialogVisible to true.
 			messageDialogContents: null,
 			messageDialogVisible: false,
+			// dialogWidth and dialogHeight should be set to accomodate the size of
+			// the text message we display in the dialog.
+			dialogWidth: 0,
+			dialogHeight: 0,
 		};
 	},
 
@@ -204,7 +213,7 @@ cam.IndexPage = React.createClass({
 				aspects[selectedAspect] && aspects[selectedAspect].createContent(contentSize, this.state.backwardPiggy)
 			),
 			this.getSidebar_(aspects[selectedAspect]),
-			this.getUploadDialog_(),
+			this.getProgressDialog_(),
 			this.getMessageDialog_()
 		);
 	},
@@ -358,7 +367,7 @@ cam.IndexPage = React.createClass({
 		this.dragEndTimer_ = window.setTimeout(this.handleDragStop_, 2000);
 		this.setState({
 			dropActive: true,
-			uploadDialogVisible: false,
+			progressDialogVisible: false,
 		});
 	},
 
@@ -372,6 +381,40 @@ cam.IndexPage = React.createClass({
 			window.clearTimeout(this.dragEndTimer_);
 			this.dragEndTimer_ = 0;
 		}
+	},
+
+	onAddToSetStart_: function() {
+		var numNodes = goog.object.getCount(this.state.selection);
+		this.setState({
+			progressDialogVisible: true,
+			totalNodesToAdd: numNodes,
+			nodesAlreadyAdded: 0,
+		});
+
+		console.log('Adding %d item(s) to set...', numNodes);
+	},
+
+	onAddMemberToSet_: function(ref) {
+		var nodesAdded = this.state.nodesAlreadyAdded + 1;
+		this.setState({
+			nodesAlreadyAdded: nodesAdded
+		});
+
+		console.log('Added item to set: %s', ref);
+	},
+
+	onAddToSetComplete_: function(permanode) {
+		if (this.state.totalNodesToAdd != this.state.nodesAlreadyAdded) {
+			return;
+		}
+		console.log('Set creation complete!');
+		this.setState({
+			progressDialogVisible: false,
+			totalNodesToAdd: 0,
+		});
+		this.setSelection_({});
+		this.refreshIfNecessary_();
+		this.navigator_.navigate(this.getDetailURL_(permanode));
 	},
 
 	onUploadStart_: function(files) {
@@ -403,7 +446,7 @@ cam.IndexPage = React.createClass({
 		this.setState({
 			totalBytesToUpload: 0,
 			totalBytesComplete: 0,
-			uploadDialogVisible: false
+			progressDialogVisible: false
 		});
 	},
 
@@ -689,7 +732,8 @@ cam.IndexPage = React.createClass({
 		}
 
 		console.log('Creating new search session for query %s', queryString);
-		var ss = new cam.SearchSession(this.props.serverConnection, this.baseURL_.clone(), opt_query, opt_targetBlobref, opt_sort);
+		var ss = new cam.SearchSession(this.props.serverConnection, this.baseURL_.clone(), opt_query,
+			this.handleSearchQueryError_.bind(this), opt_targetBlobref, opt_sort);
 		this.eh_.listen(ss, cam.SearchSession.SEARCH_SESSION_CHANGED, function() {
 			this.forceUpdate();
 		});
@@ -704,6 +748,25 @@ cam.IndexPage = React.createClass({
 		ss.loadMoreResults();
 		this.searchSessionCache_.splice(0, 0, ss);
 		return ss;
+	},
+
+	// handleSearchQueryError_ removes the last search query from the search session
+	// cache, and displays the errorMsg in a dialog.
+	handleSearchQueryError_: function(errorMsg) {
+		this.searchSessionCache_.splice(0, 1);
+		var nbl = errorMsg.length / 40; // 40 chars per line.
+		this.setState({
+			messageDialogVisible: true,
+			dialogWidth: 40*16, // 16px char width, 40 chars width
+			dialogHeight: (nbl+1)*1.5*16, // 16px char height, and 1.5 to account for line spacing
+			messageDialogContents: React.DOM.div({
+				style: {
+					textAlign: 'center',
+					fontSize: 'medium',
+				},},
+				React.DOM.div({}, errorMsg)
+			),
+		});
 	},
 
 	pruneSearchSessionCache_: function() {
@@ -745,6 +808,7 @@ cam.IndexPage = React.createClass({
 				}, this),
 				onUpload: this.handleUpload_,
 				onNewPermanode: this.handleCreateSetWithSelection_,
+				onImportShare: this.getImportShareDialog_,
 				onSearch: this.setSearch_,
 				favoritesURL: this.getFavoritesURL_(),
 				statusURL: this.baseURL_.resolve(new goog.Uri(this.props.config.statusRoot)),
@@ -793,12 +857,11 @@ cam.IndexPage = React.createClass({
 
 	handleAddToSet_: function() {
 		this.addMembersToSet_(this.state.currentSet, goog.object.getKeys(this.state.selection));
-		alert('Done!');
 	},
 
 	handleUpload_: function() {
 		this.setState({
-			uploadDialogVisible: true,
+			progressDialogVisible: true,
 		});
 	},
 
@@ -811,21 +874,78 @@ cam.IndexPage = React.createClass({
 		}.bind(this));
 	},
 
+	getImportShareDialog_: function() {
+		this.setState({
+			messageDialogVisible: true,
+			messageDialogContents: React.DOM.div({
+				style: {
+					textAlign: 'center',
+					position: 'relative',
+				},},
+				React.DOM.div({}, 'Import from a share URL'),
+				React.DOM.div({},
+					React.DOM.form({onSubmit: function(e) {
+							e.preventDefault();
+							goreact.ImportShare(this.props.config, this.state.importShareURL, this.updateImportShareDialog_);
+						}.bind(this)},
+						React.DOM.input({
+							type: 'text',
+							onChange: function(e) {
+								this.setState({importShareURL: e.target.value});
+							}.bind(this),
+							placeholder: 'https://yourfriendserver/share/sha224-shareclaim',
+							size: 40,
+							style: {textAlign: 'center',},
+						}),
+						React.DOM.button({type: 'submit'}, 'Import')
+					)
+				)
+			),
+		});
+	},
+
+	updateImportShareDialog_: function(resultMessage, br) {
+		if (!this.state.messageDialogVisible) {
+			return;
+		}
+		if (br != "") {
+			var imported = React.DOM.a({href: br}, br);
+		}
+		this.setState({
+			messageDialogVisible: true,
+			messageDialogContents: React.DOM.div({
+				style: {
+					textAlign: 'center',
+					position: 'relative',
+				},},
+				React.DOM.div({}, ''+resultMessage),
+				React.DOM.div({
+					style: {
+						fontSize: 'smaller',
+					},},
+					imported),
+			),
+		});
+	},
+
 	addMembersToSet_: function(permanode, blobrefs) {
-		var numComplete = -1;
-		var callback = function() {
-			if (++numComplete == blobrefs.length) {
-				this.setSelection_({});
-				this.refreshIfNecessary_();
-				this.navigator_.navigate(this.getDetailURL_(permanode));
-			}
-		}.bind(this);
+		var sc = this.props.serverConnection;
+		function addMemberToSet(br, pm) {
+			return new goog.Promise(sc.newAddAttributeClaim.bind(sc, pm, 'camliMember', br));
+		}
 
-		callback();
-
-		blobrefs.forEach(function(br) {
-			this.props.serverConnection.newAddAttributeClaim(permanode, 'camliMember', br, callback);
-		}.bind(this));
+		this.onAddToSetStart_();
+		goog.Promise.all(
+			Array.prototype.map.call(blobrefs, function(br) {
+				return addMemberToSet(br, permanode)
+					.thenCatch(function(e) {
+						console.error('Unable to add member to set. item: %s, error: %s', br, e);
+					})
+					.then(this.onAddMemberToSet_.bind(null, br));
+			}.bind(this))
+		).thenCatch(function(e) {
+			console.error('Add members to set failed with error: %s', e);
+		}).then(this.onAddToSetComplete_.bind(null, permanode));
 	},
 
 	handleClearSelection_: function() {
@@ -1042,7 +1162,7 @@ cam.IndexPage = React.createClass({
 	setSearch_: function(query) {
 		var searchURL;
 		var match = query.match(/^ref:(.+)/);
-		if (match) {
+		if (match && goreact.IsBlobRef(match[1])) {
 			searchURL = this.getDetailURL_(match[1]);
 		} else {
 			searchURL = this.baseURL_.clone().setParameterValue('q', query);
@@ -1316,11 +1436,13 @@ cam.IndexPage = React.createClass({
 		}
 
 		var borderWidth = 18;
-		// TODO(mpl): make it dynamically proportional to the size of
-		// the contents. For now, I know I want to display a ~40 chars wide
-		// message, hence the rough 50em*16px/em.
-		var w = 50*16;
-		var h = 10*16;
+		var w = this.state.dialogWidth;
+		var h = this.state.dialogHeight;
+		if (w == 0 || h == 0) {
+			// arbitrary defaults
+			w = 50*16;
+			h = 10*16;
+		}
 
 		return React.createElement(cam.Dialog, {
 				availWidth: this.props.availWidth,
@@ -1332,6 +1454,9 @@ cam.IndexPage = React.createClass({
 					this.setState({
 						messageDialogVisible: false,
 						messageDialogContents: null,
+						importShareURL: null,
+						dialogWidth: 0,
+						dialogHeight: 0,
 					});
 				}.bind(this),
 			},
@@ -1343,21 +1468,26 @@ cam.IndexPage = React.createClass({
 		return this.state.totalBytesToUpload > 0;
 	},
 
-	getUploadDialog_: function() {
-		if (!this.state.uploadDialogVisible && !this.state.dropActive && !this.state.totalBytesToUpload) {
-			return null;
+
+	isAddingMembers_: function() {
+		return this.state.totalNodesToAdd > 0;
+	},
+
+	getProgressDialog_: function() {
+		if (!this.state.progressDialogVisible) {
+			return false
 		}
 
-		var piggyWidth = 88;
-		var piggyHeight = 62;
+		var keepyWidth = 118;
+		var keepyHeight = 108;
 		var borderWidth = 18;
 		var w = this.props.availWidth * 0.8;
 		var h = this.props.availHeight * 0.8;
 		var iconProps = {
 			key: 'icon',
-			sheetWidth: 10,
-			spriteWidth: piggyWidth,
-			spriteHeight: piggyHeight,
+			sheetWidth: 6,
+			spriteWidth: keepyWidth,
+			spriteHeight: keepyHeight,
 			style: {
 				marginRight: 3,
 				position: 'relative',
@@ -1366,7 +1496,7 @@ cam.IndexPage = React.createClass({
 		};
 
 		function getInputFiles() {
-			if (this.isUploading_()) {
+			if (this.isUploading_() || this.isAddingMembers_()) {
 				return null;
 			}
 			return React.DOM.div(
@@ -1401,22 +1531,23 @@ cam.IndexPage = React.createClass({
 		}
 
 		function getIcon() {
-			if (this.isUploading_()) {
+			if (this.isUploading_() || this.isAddingMembers_()) {
 				return React.createElement(cam.SpritedAnimation, cam.object.extend(iconProps, {
-					numFrames: 48,
-					src: 'glitch/npc_piggy__x1_chew_png_1354829433.png',
+					numFrames: 12,
+					startFrame: 3,
+					interval: 100,
+					src: 'keepy/keepy-dancing.png',
 				}));
 			} else if (this.state.dropActive) {
-				return React.createElement(cam.SpritedAnimation, cam.object.extend(iconProps, {
-					loopDelay: 4000,
-					numFrames: 48,
-					src: 'glitch/npc_piggy__x1_look_screen_png_1354829434.png',
-					startFrame: 6,
+				// TODO(mpl): keepy expressing interest.
+				return React.createElement(cam.SpritedImage, cam.object.extend(iconProps, {
+					index: 3,
+					src: 'keepy/keepy-dancing.png',
 				}));
 			} else {
 				return React.createElement(cam.SpritedImage, cam.object.extend(iconProps, {
-					index: 0,
-					src: 'glitch/npc_piggy__x1_look_screen_png_1354829434.png',
+					index: 3,
+					src: 'keepy/keepy-dancing.png',
 				}));
 			}
 		}
@@ -1429,7 +1560,11 @@ cam.IndexPage = React.createClass({
 			return React.DOM.div(
 				{},
 				function() {
-					if (this.isUploading_()) {
+					if (this.isAddingMembers_()) {
+						return goog.string.subs('%s of %s items added',
+							this.state.nodesAlreadyAdded,
+							this.state.totalNodesToAdd);
+					} else if (this.isUploading_()) {
 						return goog.string.subs('Uploaded %s (%s%)',
 							goog.format.numBytesToString(this.state.totalBytesComplete, 2),
 							getUploadProgressPercent.call(this));
@@ -1454,7 +1589,7 @@ cam.IndexPage = React.createClass({
 				width: w,
 				height: h,
 				borderWidth: borderWidth,
-				onClose: this.state.uploadDialogVisible ? this.handleCloseUploadDialog_ : null,
+				onClose: this.state.progressDialogVisible ? this.handleCloseProgressDialog_ : null,
 			},
 			React.DOM.div(
 				{
@@ -1462,8 +1597,8 @@ cam.IndexPage = React.createClass({
 					style: {
 						textAlign: 'center',
 						position: 'relative',
-						left: -piggyWidth / 2,
-						top: (h - piggyHeight - borderWidth * 2) / 2,
+						left: -keepyWidth / 2,
+						top: (h - keepyHeight - borderWidth * 2) / 2,
 					},
 				},
 				getIcon.call(this),
@@ -1473,9 +1608,9 @@ cam.IndexPage = React.createClass({
 		);
 	},
 
-	handleCloseUploadDialog_: function() {
+	handleCloseProgressDialog_: function() {
 		this.setState({
-			uploadDialogVisible: false,
+			progressDialogVisible: false,
 		});
 	},
 

@@ -48,6 +48,8 @@ ignored = [
   "github.com/gopherjs/gopherjs/tests",
   "github.com/gopherjs/gopherjs/tests/*",
   "github.com/gorilla/websocket/examples",
+  "github.com/mattn/go-mastodon/testdata",
+  "github.com/mattn/go-mastodon/cmd/*",
   "github.com/rwcarlsen/goexif/exif/corrupt",
   "github.com/rwcarlsen/goexif/exif/samples",
   "github.com/russross/blackfriday/testdata",
@@ -112,6 +114,10 @@ ignored = [
   revision = "b197f7a2c317098d18afe80f0d6789782d52a090"
 
 [[constraint]]
+  name = "github.com/aws/aws-sdk-go"
+  version = "1.14.3"
+
+[[constraint]]
   name = "github.com/bradfitz/latlong"
   revision = "b745505085619d2818bc4b32b5a9fcc539e551fd"
 
@@ -133,7 +139,7 @@ ignored = [
 
 [[constraint]]
   name = "github.com/go-sql-driver/mysql"
-  version = "1.3.0"
+  revision = "99ff426eb706cffe92ff3d058e168b278cabf7c7"
 
 [[constraint]]
   name = "github.com/golang/snappy"
@@ -145,7 +151,7 @@ ignored = [
 
 [[constraint]]
   name = "github.com/gopherjs/gopherjs"
-  branch = "master"
+  revision = "0210a2f0f73c96103378b0b935f39868e5731809"
 
 [[constraint]]
   name = "github.com/gopherjs/jquery"
@@ -174,6 +180,10 @@ ignored = [
 [[constraint]]
   name = "github.com/mailgun/mailgun-go"
   revision = "17e8bd11e87cb660ba5da8d635bbeae44b9443ac"
+
+[[constraint]]
+  name = "github.com/mattn/go-mastodon"
+  revision = "2ccbcfe14d7ae9129fa84fbf37d030b046abbfdf"
 
 [[constraint]]
   name = "github.com/mattn/go-sqlite3"
@@ -217,7 +227,7 @@ ignored = [
 
 [[constraint]]
   name = "github.com/syndtr/goleveldb"
-  revision = "34011bf325bce385408353a30b101fe5e923eb6e"
+  revision = "db3ee9ee8931e51af7158114b9d02bf93d1a7811"
 
 [[constraint]]
   name = "github.com/tgulacsi/picago"
@@ -231,7 +241,7 @@ ignored = [
 
 [[constraint]]
   name = "golang.org/x/crypto"
-  revision = "master"
+  branch = "master"
 
 [[constraint]]
   name = "golang.org/x/image"
@@ -297,12 +307,8 @@ ignored = [
   revision = "24aa052bc5c63cfb9383bf59493ee48621ca788c"
 
 [[constraint]]
-  name = "myitcv.io/gogenerate"
-  revision ="bd69a94c96953d20e106734856b69d71c8fa122b"
-
-[[constraint]]
-  name = "myitcv.io/react"
-  revision = "bca7c66b77ed8a5b86fb77cff70914c4a7cc3ce5"
+  name = "myitcv.io"
+  revision = "bf2c84553c7827a1cb6cecf19424fdb93b887d5b"
 
 [[constraint]]
   name = "rsc.io/pdf"

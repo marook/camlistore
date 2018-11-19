@@ -56,6 +56,7 @@ const (
 	tokenRequestURL               = "https://api.twitter.com/oauth/access_token"
 	userInfoAPIPath               = "account/verify_credentials.json"
 	userTimeLineAPIPath           = "statuses/user_timeline.json"
+	userLikesAPIPath              = "favorites/list.json"
 
 	// runCompleteVersion is a cache-busting version number of the
 	// importer code. It should be incremented whenever the
@@ -75,6 +76,13 @@ const (
 	// ... and re-do an import.
 	acctAttrTweetZip = "twitterArchiveZipFileRef"
 
+	// acctAttrImportLikes specifies an optional attribte for the account permanode.
+	// If set to true likes are imported via the twitter API.
+	// You can enable importing likes like this:
+	//   $ pk-put attr <acct-permanode> twitterImportLikes true
+	// ... and re-do an import.
+	acctAttrImportLikes = "twitterImportLikes"
+
 	// acctAttrZipDoneVersion is updated at the end of a successful zip import and
 	// is used to determine whether the zip file needs to be re-imported in a future run.
 	acctAttrZipDoneVersion = "twitterZipDoneVersion" // == "<fileref>:<runCompleteVersion>"
@@ -84,6 +92,12 @@ const (
 
 	tweetRequestLimit = 200 // max number of tweets we can get in a user_timeline request
 	tweetsAtOnce      = 20  // how many tweets to import at once
+
+	// A tweet is stored as a permanode with the "twitter.com:tweet" camliNodeType value.
+	nodeTypeTweet = "twitter.com:tweet"
+
+	// A like is stored as a permanode with the "twitter.com:like" camliNodeType value.
+	nodeTypeLike = "twitter.com:like"
 )
 
 var oAuthURIs = importer.OAuthURIs{
@@ -150,8 +164,29 @@ func (im *imp) AccountSetupHTML(host *importer.Host) string {
   <li>Website: <b>%s</b></li>
   <li>Callback URL: <b>%s</b></li>
 </ul>
-<p>Click "Create your Twitter application".You should be redirected to the Application Management page of your newly created application.
-</br>Go to the API Keys tab. Copy the "API key" and "API secret" into the "Client ID" and "Client Secret" boxes above.</p>
+<!-- TODO(mpl): use CSS to style it to 80 chars wide instead of doing it in source -->
+<p>
+Click "Create your Twitter application".You should be redirected to the</br>
+Application Management page of your newly created application.</br>
+Go to the "Keys and Access Tokens" tab. Copy the "Consumer Key (API Key)" and</br>
+"Consumer Secret (API Secret)" into the "Client ID" and "Client Secret" boxes</br>
+above.
+</p>
+<p>
+Note that the twitter API prevents us from getting more than 3200 tweets<br>
+(including retweets) through your user timeline. So if you have more than that<br>
+limit (and want to get them all), after you have configured this account, you<br>
+need to download all your data as a zip first. Which you can do on your twitter<br>
+page, at: "Settings and Privacy", "Your Twitter data", "Download your Twitter<br>
+data". Then upload it to your instance with "pk-put file tweets.zip" (this will<br>
+return the zip-fileref), and signal the twitter importer that you have it, with<br>
+"pk-put attr &lt;acct-permanode&gt; twitterArchiveZipFileRef &lt;zip-fileref&gt;".<br>
+Then you can start running the importer.
+</p>
+<p>
+If you want to import likes as well, please run <br>
+"pk-put attr &lt;acct-permanode&gt; twitterImportLikes true" to enable it.
+</p>
 `, base, base+"/callback")
 }
 
@@ -208,7 +243,18 @@ func (im *imp) Run(ctx *importer.RunContext) error {
 
 	skipAPITweets, _ := strconv.ParseBool(os.Getenv("CAMLI_TWITTER_SKIP_API_IMPORT"))
 	if !skipAPITweets {
-		if err := r.importTweets(userID); err != nil {
+		if err := r.importTweets(userID, userTimeLineAPIPath); err != nil {
+			return err
+		}
+	}
+
+	acctNode, err = ctx.Host.ObjectFromRef(acctNode.PermanodeRef())
+	if err != nil {
+		return fmt.Errorf("error reloading account node: %v", err)
+	}
+	importLikes, err := strconv.ParseBool(acctNode.Attr(acctAttrImportLikes))
+	if err == nil && importLikes {
+		if err := r.importTweets(userID, userLikesAPIPath); err != nil {
 			return err
 		}
 	}
@@ -322,11 +368,22 @@ func (r *run) doAPI(result interface{}, apiPath string, keyval ...string) error 
 		r.accessCreds}.PopulateJSONFromURL(result, apiURL+apiPath, keyval...)
 }
 
-func (r *run) importTweets(userID string) error {
+// importTweets imports the tweets related to userID, through apiPath.
+// If apiPath is userTimeLineAPIPath, the tweets and retweets posted by userID are imported.
+// If apiPath is userLikesAPIPath, the tweets liked by userID are imported.
+func (r *run) importTweets(userID string, apiPath string) error {
 	maxId := ""
 	continueRequests := true
 
-	tweetsNode, err := r.getTopLevelNode("tweets")
+	var tweetsNode *importer.Object
+	var err error
+	var importType string
+	if apiPath == userLikesAPIPath {
+		importType = "likes"
+	} else {
+		importType = "tweets"
+	}
+	tweetsNode, err = r.getTopLevelNode(importType)
 	if err != nil {
 		return err
 	}
@@ -351,11 +408,11 @@ func (r *run) importTweets(userID string) error {
 		var resp []*apiTweetItem
 		var err error
 		if maxId == "" {
-			log.Printf("twitter: fetching tweets for userid %s", userID)
-			err = r.doAPI(&resp, userTimeLineAPIPath, attrs...)
+			log.Printf("twitter: fetching %s for userid %s", importType, userID)
+			err = r.doAPI(&resp, apiPath, attrs...)
 		} else {
-			log.Printf("twitter: fetching tweets for userid %s with max ID %s", userID, maxId)
-			err = r.doAPI(&resp, userTimeLineAPIPath,
+			log.Printf("twitter: fetching %s for userid %s with max ID %s", userID, importType, maxId)
+			err = r.doAPI(&resp, apiPath,
 				append(attrs, "max_id", maxId)...)
 		}
 		if err != nil {
@@ -399,14 +456,14 @@ func (r *run) importTweets(userID string) error {
 			return err
 		}
 		numTweets += newThisBatch
-		log.Printf("twitter: imported %d tweets this batch; %d total.", newThisBatch, numTweets)
+		log.Printf("twitter: imported %d %s this batch; %d total.", newThisBatch, importType, numTweets)
 		if r.incremental && allDups {
 			log.Printf("twitter: incremental import found end batch")
 			break
 		}
 		continueRequests = newThisBatch > 0
 	}
-	log.Printf("twitter: successfully did full run of importing %d tweets", numTweets)
+	log.Printf("twitter: successfully did full run of importing %d %s", numTweets, importType)
 	return nil
 }
 
@@ -516,9 +573,14 @@ func (r *run) importTweet(parent *importer.Object, tweet tweetItem, viaAPI bool)
 		r.AccountNode().Attr(importer.AcctAttrUserName),
 		id)
 
+	nodeType := nodeTypeTweet
+	if tweet.Liked() {
+		nodeType = nodeTypeLike
+	}
+
 	attrs := []string{
 		"twitterId", id,
-		nodeattr.Type, "twitter.com:tweet",
+		nodeattr.Type, nodeType,
 		nodeattr.StartDate, schema.RFC3339FromTime(createdTime),
 		nodeattr.Content, tweet.Text(),
 		nodeattr.URL, url,
@@ -600,6 +662,8 @@ func (r *run) getTopLevelNode(path string) (*importer.Object, error) {
 	switch path {
 	case "tweets":
 		title = fmt.Sprintf("%s's Tweets", acctNode.Attr(importer.AcctAttrUserName))
+	case "likes":
+		title = fmt.Sprintf("%s's Likes", acctNode.Attr(importer.AcctAttrUserName))
 	}
 	return obj, obj.SetAttr(nodeattr.Title, title)
 }
@@ -715,6 +779,7 @@ type tweetItem interface {
 	CreatedAt() string
 	Text() string
 	Media() []tweetMedia
+	Liked() bool
 }
 
 type tweetMedia interface {
@@ -727,6 +792,7 @@ type apiTweetItem struct {
 	TextStr      string   `json:"text"`
 	CreatedAtStr string   `json:"created_at"`
 	Entities     entities `json:"entities"`
+	Favorited    bool     `json:"favorited"`
 
 	// One or both might be present:
 	Geo         *geo    `json:"geo"`         // lat, long
@@ -804,6 +870,9 @@ func (t *apiTweetItem) Media() (ret []tweetMedia) {
 	ret = append(ret, getImagesFromURLs(t.Entities.URLs)...)
 	return
 }
+
+func (t *apiTweetItem) Liked() bool { return t.Favorited }
+func (t *zipTweetItem) Liked() bool { return false }
 
 type geo struct {
 	Coordinates []float64 `json:"coordinates"` // lat,long

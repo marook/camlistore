@@ -271,21 +271,14 @@ func setupContainer(t *testing.T, image string, port int, timeout time.Duration,
 
 const (
 	mongoImage       = "mpl7/mongo"
-	mysqlImage       = "mysql:5"
+	mysqlImage       = "mysql:8"
 	MySQLUsername    = "root"
 	MySQLPassword    = "root"
 	postgresImage    = "nornagon/postgres"
 	PostgresUsername = "docker" // set up by the dockerfile of postgresImage
 	PostgresPassword = "docker" // set up by the dockerfile of postgresImage
 	camliHub         = "https://storage.googleapis.com/camlistore-docker/"
-	fakeS3Image      = "camlistore/fakes3"
 )
-
-func SetupFakeS3Container(t *testing.T) (c ContainerID, ip string) {
-	return setupContainer(t, fakeS3Image, 4567, 10*time.Second, func() (string, error) {
-		return run("-d", fakeS3Image)
-	})
-}
 
 // SetupMongoContainer sets up a real MongoDB instance for testing purposes,
 // using a Docker container. It returns the container ID and its IP address,

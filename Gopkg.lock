@@ -31,6 +31,46 @@
   revision = "b197f7a2c317098d18afe80f0d6789782d52a090"
 
 [[projects]]
+  name = "github.com/aws/aws-sdk-go"
+  packages = [
+    "aws",
+    "aws/awserr",
+    "aws/awsutil",
+    "aws/client",
+    "aws/client/metadata",
+    "aws/corehandlers",
+    "aws/credentials",
+    "aws/credentials/ec2rolecreds",
+    "aws/credentials/endpointcreds",
+    "aws/credentials/stscreds",
+    "aws/csm",
+    "aws/defaults",
+    "aws/ec2metadata",
+    "aws/endpoints",
+    "aws/request",
+    "aws/session",
+    "aws/signer/v4",
+    "internal/sdkio",
+    "internal/sdkrand",
+    "internal/sdkuri",
+    "internal/shareddefaults",
+    "private/protocol",
+    "private/protocol/eventstream",
+    "private/protocol/eventstream/eventstreamapi",
+    "private/protocol/query",
+    "private/protocol/query/queryutil",
+    "private/protocol/rest",
+    "private/protocol/restxml",
+    "private/protocol/xml/xmlutil",
+    "service/s3",
+    "service/s3/s3iface",
+    "service/s3/s3manager",
+    "service/sts"
+  ]
+  revision = "bc3f534c19ffdf835e524e11f0f825b3eaf541c3"
+  version = "v1.14.31"
+
+[[projects]]
   name = "github.com/bradfitz/latlong"
   packages = ["."]
   revision = "b745505085619d2818bc4b32b5a9fcc539e551fd"
@@ -96,10 +136,15 @@
   revision = "7d749055310d0d9fed966cd500664dbca484967e"
 
 [[projects]]
+  name = "github.com/go-ini/ini"
+  packages = ["."]
+  revision = "358ee7663966325963d4e8b2e1fbd570c5195153"
+  version = "v1.38.1"
+
+[[projects]]
   name = "github.com/go-sql-driver/mysql"
   packages = ["."]
-  revision = "a0583e0143b1624142adab07e0e97fe106d99561"
-  version = "v1.3"
+  revision = "99ff426eb706cffe92ff3d058e168b278cabf7c7"
 
 [[projects]]
   name = "github.com/golang/protobuf"
@@ -127,7 +172,6 @@
   revision = "da06d194a00e19ce00d9011a13931c3f6f6887c7"
 
 [[projects]]
-  branch = "master"
   name = "github.com/gopherjs/gopherjs"
   packages = [
     ".",
@@ -144,7 +188,7 @@
     "js",
     "nosync"
   ]
-  revision = "8dffc02ea1cb8398bb73f30424697c60fcf8d4c5"
+  revision = "0210a2f0f73c96103378b0b935f39868e5731809"
 
 [[projects]]
   name = "github.com/gopherjs/jquery"
@@ -178,6 +222,11 @@
   version = "v1.0"
 
 [[projects]]
+  name = "github.com/jmespath/go-jmespath"
+  packages = ["."]
+  revision = "0b12d6b5"
+
+[[projects]]
   name = "github.com/kardianos/osext"
   packages = ["."]
   revision = "29ae4ffbc9a6fe9fb2bc5029050ce6996ea1d3bc"
@@ -205,6 +254,11 @@
   name = "github.com/mailgun/mailgun-go"
   packages = ["."]
   revision = "17e8bd11e87cb660ba5da8d635bbeae44b9443ac"
+
+[[projects]]
+  name = "github.com/mattn/go-mastodon"
+  packages = ["."]
+  revision = "2ccbcfe14d7ae9129fa84fbf37d030b046abbfdf"
 
 [[projects]]
   name = "github.com/mattn/go-sqlite3"
@@ -263,7 +317,7 @@
     "exif",
     "tiff"
   ]
-  revision = "fb35d3c3290d09f3524b684b5d42d0063c227158"
+  revision = "8d986c03457a2057c7b0fb0a48113f7dd48f9619"
 
 [[projects]]
   branch = "master"
@@ -305,12 +359,18 @@
     "leveldb/table",
     "leveldb/util"
   ]
-  revision = "34011bf325bce385408353a30b101fe5e923eb6e"
+  revision = "db3ee9ee8931e51af7158114b9d02bf93d1a7811"
 
 [[projects]]
   name = "github.com/tgulacsi/picago"
   packages = ["."]
   revision = "9e1ac2306c701ca7477a169b2b49902b7b4c58bf"
+
+[[projects]]
+  name = "github.com/tomnomnom/linkheader"
+  packages = ["."]
+  revision = "6953a30d444317754766fccdd3f7f000edc874f6"
+  version = "0.1.0"
 
 [[projects]]
   branch = "master"
@@ -341,6 +401,7 @@
   revision = "a2a47940e6bcb2098c42264fb0515cb027f2564a"
 
 [[projects]]
+  branch = "master"
   name = "golang.org/x/crypto"
   packages = [
     "acme",
@@ -350,6 +411,7 @@
     "ed25519",
     "ed25519/internal/edwards25519",
     "internal/chacha20",
+    "internal/subtle",
     "nacl/secretbox",
     "openpgp",
     "openpgp/armor",
@@ -364,7 +426,7 @@
     "ssh",
     "ssh/terminal"
   ]
-  revision = "master"
+  revision = "c126467f60eb25f8f27e5a981f32a87e3965053f"
 
 [[projects]]
   name = "golang.org/x/image"
@@ -491,6 +553,7 @@
   name = "google.golang.org/appengine"
   packages = [
     ".",
+    "cloudsql",
     "internal",
     "internal/app_identity",
     "internal/base",
@@ -559,22 +622,18 @@
   revision = "24aa052bc5c63cfb9383bf59493ee48621ca788c"
 
 [[projects]]
-  name = "myitcv.io/gogenerate"
-  packages = ["."]
-  revision = "bd69a94c96953d20e106734856b69d71c8fa122b"
-
-[[projects]]
-  name = "myitcv.io/react"
+  name = "myitcv.io"
   packages = [
-    ".",
-    "cmd/reactGen",
-    "internal/bundle",
-    "internal/core",
-    "internal/dev",
-    "internal/preact",
-    "internal/prod"
+    "gogenerate",
+    "react",
+    "react/cmd/reactGen",
+    "react/internal/bundle",
+    "react/internal/core",
+    "react/internal/dev",
+    "react/internal/preact",
+    "react/internal/prod"
   ]
-  revision = "bca7c66b77ed8a5b86fb77cff70914c4a7cc3ce5"
+  revision = "bf2c84553c7827a1cb6cecf19424fdb93b887d5b"
 
 [[projects]]
   name = "rsc.io/pdf"
@@ -593,6 +652,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "06274b99a4551acdcba8ff508d8f5395cd07d788cb7f629e9361f2c431b72411"
+  inputs-digest = "80502c7bdbd59ee4ed8d53c9d37463b311c3ccac2f365d5325b5f61fe85e42bc"
   solver-name = "gps-cdcl"
   solver-version = 1

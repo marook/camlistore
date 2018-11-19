@@ -92,10 +92,15 @@ At least one of these must be set:
 * `memoryStorage`: if true, blobs will be stored in memory only. This is
   generally only useful for debugging & development.
 * `blobPath`: local disk path to store blobs. (valid for diskpacked too).
-* `s3`: "`key:secret:bucket[/optional/dir]`" or "`key:secret:bucket[/optional/dir]:hostname`" (with colons,
-  but no quotes).
+* `s3`: "`key:secret:bucket[/optional/dir]`" or
+  "`key:secret:bucket[/optional/dir]:hostname`" (with colons, but no quotes).
 * `b2`: "`account_id:application_key:bucket[/optional/dir]`".
 * `googlecloudstorage`: "`clientId:clientSecret:refreshToken:bucketName[/optional/dir]`"
+
+The `s3` storage option's `hostname` value may be set to use an S3-compatible
+endpoint instead of AWS S3, such as `my-minio-server.example.com`. A specific
+region may be specified by using [Low-level Configuration](#lowlevel), though
+the bucket's region will generally be detected automatically.
 
 Additionally, there are two mutually exclusive options which only apply if `blobPath` is set:
 
@@ -139,8 +144,8 @@ create a schema in addition to the default schema. You will need `grant create,
 insert, update, delete, alter, show databases on *.*` permissions for your
 database user.
 
-You can use the [camtool dbinit](/cmd/camtool/) command to initialize your
-database, and see [dbinit.go](/cmd/camtool/dbinit.go) and
+You can use the [pk dbinit](/cmd/pk/) command to initialize your
+database, and see [dbinit.go](/cmd/pk/dbinit.go) and
 [dbschema.go](/pkg/sorted/mysql/dbschema.go) if you're curious about the
 details.
 
@@ -149,13 +154,12 @@ details.
 Perkeep uses Go html templates to publish pages, and publishing can be
 configured through the `publish` key. There is already support for an image
 gallery view, which can be enabled similarly to the example below (obviously,
-the rootPermanode will be different).
+the camliRoot will be different).
 
     "publish": {
       "/pics/": {
         "camliRoot": "mypics",
-        "backendURL": "http://localhost:3178/",
-        "cacheRoot": "/home/joe/var/camlistore/blobs/cache",
+        "cacheRoot": "/home/joe/var/perkeep/blobs/cache",
         "goTemplate": "gallery.html"
       }
     }
@@ -164,9 +168,28 @@ See the
 [serverconfig.Publish](https://perkeep.org/pkg/types/serverconfig/#Publish)
 type for all the configuration parameters.
 
-One can create any permanode with pk put or the UI, and set its camliRoot
+One can create any permanode with **pk-put** or the web UI, and set its camliRoot
 attribute to the value set in the config, to use it as the root permanode for
 publishing.
+
+One common use-case is for Perkeep (and the publisher app) to run behind a
+reverse-proxy (such as Nginx), which takes care of the TLS termination, and
+where therefore it might be acceptable for both perkeepd and publisher to listen
+for non-TLS HTTP connections. In that case, the app handler configuration
+parameters should be specified, such as in the example below. In addition,
+please note that the reverse-proxy should not modify the Host header of the
+incoming requests.
+
+    "publish": {
+        "/pics/": {
+            "camliRoot": "mypics",
+            "cacheRoot": "/home/joe/var/perkeep/blobs/cache",
+            "goTemplate": "gallery.html",
+            "apiHost": "http://localhost:3179/",
+            "listen": ":44352",
+            "backendURL": "http://localhost:44352/"
+        }
+    },
 
 Please see the [publishing README](/doc/publishing/README) for further details
 on how to set up permanodes for publishing, or if you want to
@@ -203,7 +226,7 @@ The following steps should get you started with MySQL:
   * Add a <b>dbname</b> option. (ex: "dbname": "camliprod")
   * Add a <b>mysql</b> option. (ex: "mysql": "foo@localhost:bar")
 * Create a dedicated user/password for your mysql server.
-* Initialize the database with **camtool**: `camtool dbinit --user=foo
+* Initialize the database with **pk**: `pk dbinit --user=foo
   --password=bar --host=localhost --dbname=camliprod --wipe`
 
 Setting up MongoDB is even simpler, but the MongoDB indexer is not as well
@@ -235,7 +258,7 @@ If `"/bs"` is the storage for your primary instance, such as for example:
             "handlerArgs": {
                 "largeBlobs": "/bs-packed/",
                 "metaIndex": {
-                    "file": "/home/you/var/camlistore/blobs/packed/packindex.leveldb",
+                    "file": "/home/you/var/perkeep/blobs/packed/packindex.leveldb",
                     "type": "leveldb"
                 },
                 "smallBlobs": "/bs-loose/"

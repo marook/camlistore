@@ -20,7 +20,6 @@ package fs
 
 import (
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,14 +67,14 @@ func (n *recentDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.lastReaddir.After(time.Now().Add(-recentSearchInterval)) {
-		log.Printf("fs.recent: ReadDirAll from cache")
+		Logger.Printf("fs.recent: ReadDirAll from cache")
 		for _, name := range n.lastNames {
 			ents = append(ents, fuse.Dirent{Name: name})
 		}
 		return ents, nil
 	}
 
-	log.Printf("fs.recent: ReadDirAll, doing search")
+	Logger.Printf("fs.recent: ReadDirAll, doing search")
 
 	n.ents = make(map[string]*search.DescribedBlob)
 	n.modTime = make(map[string]time.Time)
@@ -83,7 +82,7 @@ func (n *recentDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	req := &search.RecentRequest{N: 100}
 	res, err := n.fs.client.GetRecentPermanodes(ctx, req)
 	if err != nil {
-		log.Printf("fs.recent: GetRecentPermanodes error in ReadDirAll: %v", err)
+		Logger.Printf("fs.recent: GetRecentPermanodes error in ReadDirAll: %v", err)
 		return nil, fuse.EIO
 	}
 
@@ -119,20 +118,20 @@ func (n *recentDir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 			if ext == "" && ccMeta.File != nil && strings.HasSuffix(ccMeta.File.MIMEType, "image/jpeg") {
 				ext = ".jpg"
 			}
-			name = strings.TrimPrefix(ccMeta.BlobRef.String(), "sha1-")[:10] + ext
+			name = strings.TrimPrefix(ccMeta.BlobRef.String(), ccMeta.BlobRef.HashName()+"-")[:10] + ext
 			if n.ents[name] != nil {
 				continue
 			}
 		}
 		n.ents[name] = ccMeta
 		n.modTime[name] = modTime
-		log.Printf("fs.recent: name %q = %v (at %v -> %v)", name, ccMeta.BlobRef, ri.ModTime.Time(), modTime)
+		Logger.Printf("fs.recent: name %q = %v (at %v -> %v)", name, ccMeta.BlobRef, ri.ModTime.Time(), modTime)
 		n.lastNames = append(n.lastNames, name)
 		ents = append(ents, fuse.Dirent{
 			Name: name,
 		})
 	}
-	log.Printf("fs.recent returning %d entries", len(ents))
+	Logger.Printf("fs.recent returning %d entries", len(ents))
 	n.lastReaddir = time.Now()
 	return ents, nil
 }
@@ -148,7 +147,7 @@ func (n *recentDir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		n.mu.Lock()
 	}
 	db := n.ents[name]
-	log.Printf("fs.recent: Lookup(%q) = %v", name, db)
+	Logger.Printf("fs.recent: Lookup(%q) = %v", name, db)
 	if db == nil {
 		return nil, fuse.ENOENT
 	}

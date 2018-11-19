@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 
 	"perkeep.org/pkg/cmdmain"
 )
@@ -33,13 +34,18 @@ import (
 var (
 	defaultHook = filepath.FromSlash("misc/commit-msg.githook")
 	hookFile    = filepath.FromSlash(".git/hooks/commit-msg")
+	configFile  = filepath.FromSlash(".git/config")
 )
 
-type reviewCmd struct{}
+type reviewCmd struct {
+	releaseBranch string
+}
 
 func init() {
 	cmdmain.RegisterMode("review", func(flags *flag.FlagSet) cmdmain.CommandRunner {
-		return new(reviewCmd)
+		cmd := &reviewCmd{}
+		flags.StringVar(&cmd.releaseBranch, "branch", "", "Alternative release branch to push to. Defaults to master branch.")
+		return cmd
 	})
 }
 
@@ -57,7 +63,8 @@ func (c *reviewCmd) RunCommand(args []string) error {
 	}
 	goToCamliRoot()
 	c.checkHook()
-	gitPush()
+	checkOrigin()
+	c.gitPush()
 	return nil
 }
 
@@ -113,9 +120,50 @@ func (c *reviewCmd) checkHook() {
 	}
 }
 
-func gitPush() {
-	cmd := exec.Command("git",
-		[]string{"push", "https://camlistore.googlesource.com/camlistore", "HEAD:refs/for/master"}...)
+const newOrigin = "https://perkeep.googlesource.com/perkeep"
+
+var (
+	newFetch = regexp.MustCompile(`.*Fetch\s+URL:\s+` + newOrigin + `.*`)
+	newPush  = regexp.MustCompile(`.*Push\s+URL:\s+` + newOrigin + `.*`)
+)
+
+func checkOrigin() {
+	out, err := exec.Command("git", "remote", "show", "origin").CombinedOutput()
+	if err != nil {
+		log.Fatalf("%v, %s", err, out)
+	}
+
+	if !newPush.Match(out) {
+		setPushOrigin()
+	}
+
+	if !newFetch.Match(out) {
+		setFetchOrigin()
+	}
+}
+
+func setPushOrigin() {
+	out, err := exec.Command("git", "remote", "set-url", "--push", "origin", newOrigin).CombinedOutput()
+	if err != nil {
+		log.Fatalf("%v, %s", err, out)
+	}
+}
+
+func setFetchOrigin() {
+	out, err := exec.Command("git", "remote", "set-url", "origin", newOrigin).CombinedOutput()
+	if err != nil {
+		log.Fatalf("%v, %s", err, out)
+	}
+}
+
+func (c *reviewCmd) gitPush() {
+	args := []string{"push", "origin"}
+	if c.releaseBranch != "" {
+		args = append(args, "HEAD:refs/for/releases/"+c.releaseBranch)
+	} else {
+		args = append(args, "HEAD:refs/for/master")
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Stdout = cmdmain.Stdout
 	cmd.Stderr = cmdmain.Stderr
 	if err := cmd.Run(); err != nil {

@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"perkeep.org/internal/geocode"
 	"perkeep.org/internal/httputil"
 	"perkeep.org/internal/netutil"
 	"perkeep.org/internal/osutil"
@@ -103,6 +104,7 @@ var (
 	flagReindex     = flag.Bool("reindex", false, "Reindex all blobs on startup")
 	flagRecovery    = flag.Int("recovery", 0, "Recovery mode: it corresponds for now to the recovery modes of the blobpacked package. Which means: 0 does nothing, 1 rebuilds the blobpacked index without erasing it, and 2 wipes the blobpacked index before rebuilding it.")
 	flagSyslog      = flag.Bool("syslog", false, "Log everything only to syslog. It is an error to use this flag on windows.")
+	flagKeepGoing   = flag.Bool("keep-going", false, "Continue after reindex or blobpacked recovery errors")
 	flagPollParent  bool
 )
 
@@ -221,15 +223,10 @@ func setupTLS(ws *webserver.Server, config *serverinit.Config, hostname string) 
 				HostPolicy: autocert.HostWhitelist(hostname),
 				Cache:      autocert.DirCache(osutil.DefaultLetsEncryptCache()),
 			}
-			log.Printf("Starting to listen on http://0.0.0.0:80 (for Let's Encrypt challenges)")
-			// TODO(mpl): let the http-01 port be configurable, for when behind a proxy
-			go func() {
-				log.Fatalf("Could not start ACME http-014 challenge server: %v",
-					http.ListenAndServe(":http", m.HTTPHandler(nil)))
-			}()
 			ws.SetTLS(webserver.TLSSetup{
 				CertManager: m.GetCertificate,
 			})
+			log.Printf("Using Let's Encrypt tls-alpn-01 for %v", hostname)
 			return
 		}
 		// Otherwise generate new certificates
@@ -373,6 +370,23 @@ func setBlobpackedRecovery() {
 	}
 }
 
+// checkGeoKey returns nil if we have a Google Geocoding API key file stored
+// in the config dir. Otherwise it returns instruction about it as the error.
+func checkGeoKey() error {
+	if _, err := geocode.GetAPIKey(); err == nil {
+		return nil
+	}
+	keyPath, err := geocode.GetAPIKeyPath()
+	if err != nil {
+		return fmt.Errorf("error getting Geocoding API key path: %v", err)
+	}
+	if env.OnGCE() {
+		keyPath = strings.TrimPrefix(keyPath, "/gcs/")
+		return fmt.Errorf("for location related requests to properly work, you need to create a Google Geocoding API Key (see https://developers.google.com/maps/documentation/geocoding/get-api-key ), and save it in your VM's configuration bucket as: %v", keyPath)
+	}
+	return fmt.Errorf("for location related requests to properly work, you need to create a Google Geocoding API Key (see https://developers.google.com/maps/documentation/geocoding/get-api-key ), and save it in Perkeep's configuration directory as: %v", keyPath)
+}
+
 // main wraps Main so tests (which generate their own func main) can still run Main.
 func main() { Main() }
 
@@ -434,8 +448,11 @@ func Main() {
 		exitf("Error registering challenge client with Perkeep muxer: %v", err)
 	}
 
+	config.SetReindex(*flagReindex)
+	config.SetKeepGoing(*flagKeepGoing)
+
 	// Finally, install the handlers. This also does the final config validation.
-	shutdownCloser, err := config.InstallHandlers(ws, baseURL, *flagReindex)
+	shutdownCloser, err := config.InstallHandlers(ws, baseURL)
 	if err != nil {
 		exitf("Error parsing config: %v", err)
 	}
@@ -450,6 +467,10 @@ func Main() {
 	}
 	if env.OnGCE() {
 		gce.FixUserDataForPerkeepRename()
+	}
+
+	if err := checkGeoKey(); err != nil {
+		log.Printf("perkeepd: %v", err)
 	}
 
 	urlToOpen := baseURL + config.UIPath()

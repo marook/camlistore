@@ -524,7 +524,7 @@ func (c *Client) SetHaveCache(cache HaveCache) {
 
 func (c *Client) printf(format string, v ...interface{}) {
 	if c.Verbose && c.Logger != nil {
-		c.Logger.Printf(format, v)
+		c.Logger.Printf(format, v...)
 	}
 }
 
@@ -716,6 +716,10 @@ func (c *Client) GetRecentPermanodes(ctx context.Context, req *search.RecentRequ
 	return res, nil
 }
 
+// GetPermanodesWithAttr searches for permanodes that match the given search request.
+// The Fuzzy option in the request must not be set, and the Attribute option
+// must be set.
+// Only indexed attributes may be queried.
 func (c *Client) GetPermanodesWithAttr(ctx context.Context, req *search.WithAttrRequest) (*search.WithAttrResponse, error) {
 	sr, err := c.SearchRoot()
 	if err != nil {

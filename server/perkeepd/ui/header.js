@@ -24,8 +24,8 @@ goog.require('cam.SpritedImage');
 cam.Header = React.createClass({
 	displayName: 'Header',
 
-	KEEPY_NATIVE_WIDTH: 88,
-	KEEPY_NATIVE_HEIGHT: 62,
+	KEEPY_NATIVE_WIDTH: 118,
+	KEEPY_NATIVE_HEIGHT: 108,
 	KEEPY_MARGIN: {
 		LEFT: 1,
 		RIGHT: 4,
@@ -56,6 +56,7 @@ cam.Header = React.createClass({
 		importersURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
 		mainControls: React.PropTypes.arrayOf(React.PropTypes.node),
 		onNewPermanode: React.PropTypes.func,
+		onImportShare: React.PropTypes.func,
 		onSearch: React.PropTypes.func,
 		favoritesURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
 		statusURL: React.PropTypes.instanceOf(goog.Uri).isRequired,
@@ -102,7 +103,7 @@ cam.Header = React.createClass({
 
 	getKeepy_: function() {
 		var props = {
-			sheetWidth: 11,
+			sheetWidth: 6,
 			spriteWidth: this.KEEPY_NATIVE_WIDTH,
 			spriteHeight: this.KEEPY_NATIVE_HEIGHT,
 			style: cam.reactUtil.getVendorProps({
@@ -116,23 +117,23 @@ cam.Header = React.createClass({
 
 		var image = function() {
 			if (this.props.errors.length) {
-				return React.createElement(cam.SpritedAnimation, cam.object.extend(props, {
+				return React.createElement(cam.SpritedImage, cam.object.extend(props, {
+					sheetWidth: 1,
 					key: 'error',
-					loopDelay: 10 * 1000,
-					numFrames: 65,
-					src: 'glitch/npc_piggy__x1_too_much_nibble_png_1354829441.png',
+					index: 0,
+					src: 'keepy/keepy-sad.png',
 				}));
 			} else if (this.props.pendingQuery) {
 				return React.createElement(cam.SpritedAnimation, cam.object.extend(props, {
 					key: 'pending',
-					numFrames: 24,
-					src: 'glitch/npc_piggy__x1_walk_png_1354829432.png',
+					numFrames: 12,
+					src: 'keepy/keepy-dancing.png',
 				}));
 			} else {
 				return React.createElement(cam.SpritedImage, cam.object.extend(props, {
 					key: 'ok',
-					index: 5,
-					src: 'glitch/npc_piggy__x1_chew_png_1354829433.png',
+					index: 3,
+					src: 'keepy/keepy-dancing.png',
 				}));
 			}
 		};
@@ -221,6 +222,7 @@ cam.Header = React.createClass({
 			// TODO(aa): Create a new permanode UI that delays creating the permanode until the user confirms, then change this to a link to that UI.
 			// TODO(aa): Also I keep going back and forth about whether we should call this 'permanode' or 'set' in the UI. Hrm.
 			this.getMenuItem_('New set', null, this.props.onNewPermanode),
+			this.getMenuItem_('Import share', null, this.props.onImportShare),
 
 			this.getMenuItem_('Importers', this.props.importersURL),
 			this.getMenuItem_('Server status', this.props.statusURL),

@@ -583,7 +583,7 @@ func genEmbeds() error {
 		"server/perkeepd/ui",
 		"pkg/server",
 		"clients/web/embed/fontawesome",
-		"clients/web/embed/glitch",
+		"clients/web/embed/keepy",
 		"clients/web/embed/leaflet",
 		"clients/web/embed/less",
 		"clients/web/embed/opensans",
@@ -753,8 +753,8 @@ func validateDirInGOPATH(dir string) {
 }
 
 const (
-	goVersionMinor  = 10
-	gopherJSGoMinor = 10
+	goVersionMinor  = 11
+	gopherJSGoMinor = 11
 )
 
 var validVersionRx = regexp.MustCompile(`go version go1\.(\d+)`)

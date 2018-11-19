@@ -49,8 +49,9 @@ func init() {
 
 type Index struct {
 	*blobserver.NoImplStorage
-
-	s sorted.KeyValue
+	reindex   bool // whether "reindex" was set in config (likely via perkeepd flag)
+	keepGoing bool // whether "keepGoing" was set in config (likely via perkeepd flag)
+	s         sorted.KeyValue
 
 	KeyFetcher blob.Fetcher // for verifying claims
 
@@ -346,6 +347,8 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (blobserver.Stor
 	blobPrefix := config.RequiredString("blobSource")
 	kvConfig := config.RequiredObject("storage")
 	reindex := config.OptionalBool("reindex", false)
+	keepGoing := config.OptionalBool("keepGoing", false)
+
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -389,6 +392,8 @@ func newFromConfig(ld blobserver.Loader, config jsonconfig.Obj) (blobserver.Stor
 		}
 		ix, err = New(kv)
 	}
+	ix.keepGoing = keepGoing
+	ix.reindex = reindex
 	if reindex {
 		ix.hasWiped = true
 	}
@@ -440,6 +445,9 @@ func ReindexMaxProcs() int {
 	defer reindexMaxProcs.RUnlock()
 	return reindexMaxProcs.v
 }
+
+func (x *Index) WantsReindex() bool   { return x.reindex }
+func (x *Index) WantsKeepGoing() bool { return x.keepGoing }
 
 func (x *Index) Reindex() error {
 	x.Lock()
@@ -1022,6 +1030,9 @@ func (x *Index) SearchPermanodesWithAttr(ctx context.Context, dest chan<- blob.R
 	}
 	if request.Attribute == "" {
 		return errors.New("index: missing Attribute in SearchPermanodesWithAttr")
+	}
+	if !IsIndexedAttribute(request.Attribute) {
+		return fmt.Errorf("SearchPermanodesWithAttr: called with a non-indexed attribute %q", request.Attribute)
 	}
 
 	keyId, err := x.KeyId(ctx, request.Signer)

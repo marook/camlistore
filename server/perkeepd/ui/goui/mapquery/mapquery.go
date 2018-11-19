@@ -108,7 +108,7 @@ func (q *Query) send() ([]byte, error) {
 		q.pending = false
 	}()
 	if q.cl == nil {
-		am, err := auth.NewTokenAuth(q.AuthToken)
+		am, err := auth.TokenOrNone(q.AuthToken)
 		if err != nil {
 			return nil, err
 		}
@@ -232,12 +232,6 @@ func (q *Query) SetZoom(north, west, south, east float64) {
 	zoomExpr := fmt.Sprintf("map:%.6f,%.6f,%.6f,%.6f", newNorth, newWest, newSouth, newEast)
 
 	q.Expr = handleZoomPredicate(q.Expr, false, zoomExpr)
-}
-
-// GetZoom returns the location area that was requested for the last successful
-// query.
-func (q *Query) GetZoom() *camtypes.LocationBounds {
-	return q.zoom
 }
 
 // HasZoomParameter returns whether queryString is the "q" parameter of a search

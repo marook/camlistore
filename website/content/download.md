@@ -5,7 +5,7 @@ The latest release is [0.10 ("Bellingham")](/doc/release/0.10), released 2018-05
 Or, using the latest code from git:
 
     $ cd $GOPATH/src
-    $ git clone https://camlistore.googlesource.com/camlistore perkeep.org
+    $ git clone https://perkeep.googlesource.com/perkeep perkeep.org
 
 ## Build
 
@@ -35,7 +35,7 @@ the server with:
 
 This will create [configuration](/doc/server-config) and public/private
 key information in `$HOME/.config/perkeep/` (or where
-`camtool env configdir` points). You can start and stop perkeepd as
+`pk env configdir` points). You can start and stop perkeepd as
 you see fit.
 
 You're done setting up! Running perkeepd should open a new browser
